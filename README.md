@@ -79,8 +79,10 @@ Mobile apps require Better Agent Terminal **v3.1.3 or later**.
 - **Find quickly** — Search title, first prompt, last reply, branch, model, folder or session ID; filter by agent; sort by last update, creation time or message count
 - **Add to workspaces** — Add a project folder to the workspace list in one click; folders that are already workspaces show **Go** instead
 - **Resume in place** — Resume a session in a new Claude or Codex agent terminal of that workspace, started in the session's original folder; sessions that are already open are focused instead
-- **Read-only and cached** — Transcripts under `~/.claude` and the active Codex home are only read, never modified; repeat scans use a cache and finish in well under a second
-- **Remote aware** — With a remote profile, the list comes from the host machine
+- **Cached and live** — Repeat scans use a cache and finish in well under a second; the list refreshes every 10 seconds while it is open
+- **Move to Recycle Bin** — Remove old sessions together with their subagent transcripts, or every visible session of a project whose folder no longer exists. Files only ever go to the Recycle Bin / Trash, sessions updated in the last 10 minutes are refused, and on Windows a drive set to delete immediately is refused instead of deleting permanently. This is the only action that changes files under `~/.claude` or the Codex home
+- **Settings** — Settings → Agent → Session History: include non-interactive sessions (`claude --print`, `codex exec`), include Codex archived sessions, and the maximum transcript line size. `CLAUDE_CONFIG_DIR` is honoured
+- **Remote aware** — With a remote profile, the list comes from the host machine, and moving to the Recycle Bin happens on the host
 
 ### Terminal
 - **Split-panel layout** — 70% main panel + 30% scrollable thumbnail bar showing all terminals

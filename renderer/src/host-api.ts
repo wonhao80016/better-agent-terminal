@@ -11,7 +11,13 @@
 // so older shells keep working. We never fall back silently.
 
 import { dispatchTauriNativeDrop } from './utils/tauri-native-drop'
-import type { SessionHistoryListOptions, SessionHistoryResult } from './types/session-history'
+import type {
+  SessionHistoryListOptions,
+  SessionHistoryResult,
+  SessionRef,
+  SessionTrashPreview,
+  SessionTrashResult,
+} from './types/session-history'
 
 type BatAppAPI = any
 
@@ -1585,6 +1591,10 @@ function createTauriHost(): BatAppAPI {
     sessionHistory: {
       list: (options?: SessionHistoryListOptions) =>
         getInvoke()<SessionHistoryResult>('session_history_list', { options }),
+      trashPreview: (sessions: SessionRef[]) =>
+        getInvoke()<SessionTrashPreview>('session_history_trash_preview', { sessions }),
+      trash: (sessions: SessionRef[]) =>
+        getInvoke()<SessionTrashResult>('session_history_trash', { sessions }),
     },
     pty: {
       create: (options: unknown) =>

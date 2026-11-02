@@ -5,6 +5,7 @@ import { getAgentPreset } from '../types/agent-presets'
 import { CODEX_EFFORT_LEVELS, FONT_OPTIONS, COLOR_PRESETS, AGENT_COMMAND_OPTIONS, STATUSLINE_ITEMS } from '../types'
 import { CLAUDE_BUILTIN_MODELS, CLAUDE_OPUS_47_1M_PRESET, normalizeClaudeModelSelection } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
+import { normalizeSessionHistoryMaxLineMiB, SESSION_HISTORY_DEFAULT_MAX_LINE_MIB } from '../utils/session-history-actions'
 
 type Listener = () => void
 
@@ -293,6 +294,28 @@ class SettingsStore {
     this.save()
   }
 
+  setSessionHistoryIncludeNonInteractive(enabled: boolean): void {
+    this.settings = { ...this.settings, sessionHistoryIncludeNonInteractive: enabled || undefined }
+    this.notify()
+    this.save()
+  }
+
+  setSessionHistoryIncludeCodexArchived(enabled: boolean): void {
+    this.settings = { ...this.settings, sessionHistoryIncludeCodexArchived: enabled || undefined }
+    this.notify()
+    this.save()
+  }
+
+  setSessionHistoryMaxLineMiB(value: number): void {
+    const normalized = normalizeSessionHistoryMaxLineMiB(value)
+    this.settings = {
+      ...this.settings,
+      sessionHistoryMaxLineMiB: normalized === SESSION_HISTORY_DEFAULT_MAX_LINE_MIB ? undefined : normalized,
+    }
+    this.notify()
+    this.save()
+  }
+
   setDefaultModel(model: string): void {
     this.setDefaultClaudeModel(model)
   }
@@ -505,6 +528,10 @@ class SettingsStore {
         parsed.allowFastMode = parsed.allowFastMode === true
         parsed.autoResumeAfterRateLimit = parsed.autoResumeAfterRateLimit === true
         parsed.fastModeEpoch = Number.isSafeInteger(parsed.fastModeEpoch) && parsed.fastModeEpoch >= 0 ? parsed.fastModeEpoch : 0
+        parsed.sessionHistoryIncludeNonInteractive = parsed.sessionHistoryIncludeNonInteractive === true || undefined
+        parsed.sessionHistoryIncludeCodexArchived = parsed.sessionHistoryIncludeCodexArchived === true || undefined
+        const maxLineMiB = normalizeSessionHistoryMaxLineMiB(parsed.sessionHistoryMaxLineMiB)
+        parsed.sessionHistoryMaxLineMiB = maxLineMiB === SESSION_HISTORY_DEFAULT_MAX_LINE_MIB ? undefined : maxLineMiB
         this.settings = { ...defaultSettings, ...parsed }
         this.notify()
       } catch (e) {

@@ -32,6 +32,12 @@ pub(crate) struct SessionRecord {
     pub is_subagent: bool,
     pub parent_id: Option<String>,
     pub skipped_lines: u32,
+    /// Derived from where the file was found, so it is not persisted.
+    #[serde(skip)]
+    pub archived: bool,
+    /// Transcript files and folders a trash request removes; filled in by finalize, not persisted.
+    #[serde(skip)]
+    pub owned_paths: Vec<String>,
 }
 
 #[cfg(test)]

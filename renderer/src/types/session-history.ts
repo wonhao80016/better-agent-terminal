@@ -4,6 +4,8 @@ export type SessionAgent = 'claude' | 'codex'
 
 export type SessionGroupKind = 'repo' | 'dir' | 'missing' | 'unknown'
 
+export type HostPlatform = 'windows' | 'macos' | 'linux'
+
 export interface SessionHistoryEntry {
   agent: SessionAgent
   id: string
@@ -20,6 +22,10 @@ export interface SessionHistoryEntry {
   updatedAt: string | null
   groupKey: string
   skippedLines: number
+  /** False for Claude entrypoint sdk-cli and Codex source exec sessions. */
+  interactive: boolean
+  /** True when the transcript lives under Codex archived_sessions/. */
+  archived: boolean
 }
 
 export interface SessionHistoryGroup {
@@ -48,14 +54,52 @@ export interface SessionHistoryScanStatus {
 }
 
 export interface SessionHistoryResult {
-  /** Interactive, non-subagent sessions sorted by updatedAt desc. */
+  /** Non-subagent sessions sorted by updatedAt desc; non-interactive and archived ones only when requested. */
   sessions: SessionHistoryEntry[]
   /** Ordered by latest session desc; "missing" and "unknown" groups last. */
   groups: SessionHistoryGroup[]
   scan: SessionHistoryScanStatus
   caseInsensitivePaths: boolean
+  /** OS whose trash receives moved sessions; null or absent from hosts that predate the field. */
+  hostPlatform?: HostPlatform | null
 }
 
 export interface SessionHistoryListOptions {
   refresh?: boolean
+  includeNonInteractive?: boolean
+  includeCodexArchived?: boolean
+  /** The host clamps this to 1 MiB ..= 1 GiB. */
+  maxLineBytes?: number
+}
+
+/** Identity only: the host resolves the owned files from its own index, never from client paths. */
+export interface SessionRef {
+  agent: SessionAgent
+  id: string
+}
+
+export type TrashBlockReason = 'recently-updated' | 'not-found' | 'outside-data-dir'
+
+export interface SessionTrashPreviewItem {
+  agent: SessionAgent
+  id: string
+  fileCount: number
+  totalBytes: number
+  newestModifiedAt: string | null
+  blockedReason: TrashBlockReason | null
+}
+
+export interface SessionTrashPreview {
+  items: SessionTrashPreviewItem[]
+  /** Sum over non-blocked items. */
+  fileCount: number
+  /** Sum over non-blocked items. */
+  totalBytes: number
+  blockedCount: number
+}
+
+export interface SessionTrashResult {
+  trashed: SessionRef[]
+  blocked: Array<SessionRef & { reason: TrashBlockReason }>
+  failed: Array<SessionRef & { error: string }>
 }

@@ -3,25 +3,43 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import { host } from '../host-api'
+import { settingsStore } from '../stores/settings-store'
 import { useWorkspace, workspaceStore } from '../stores/workspace-store'
 import type { AppState, Workspace } from '../types'
 import type {
   SessionHistoryEntry,
   SessionHistoryGroup,
   SessionHistoryResult,
+  SessionRef,
+  SessionTrashPreview,
+  SessionTrashResult,
+  TrashBlockReason,
 } from '../types/session-history'
 import {
   buildSessionHistoryView,
   canAddGroupAsWorkspace,
   ensureWorkspace,
+  formatByteSize,
   listenForModalEscape,
+  modalDismissAction,
+  previewTrashInBatches,
   resumeInWorkspace,
   resumeUnavailableReason,
+  selectTrashableSessions,
   sessionAgentPreset,
+  sessionHistoryListOptions,
+  sessionRefKey,
   sessionResumeCommand,
+  startSessionHistoryPolling,
+  summarizeTrashResult,
+  trashableRefsFromPreview,
+  trashBinKind,
+  trashInBatches,
+  trashTextKey,
   type ResumeUnavailableReason,
   type SessionHistoryAgentFilter,
   type SessionHistorySort,
+  type SessionTrashSummary,
 } from '../utils/session-history-actions'
 import '../styles/session-history.css'
 
@@ -93,6 +111,32 @@ function isDefaultCollapsed(group: SessionHistoryGroup): boolean {
   return group.kind === 'missing'
 }
 
+function trashBlockReasonText(reason: TrashBlockReason, t: TFunction): string {
+  if (reason === 'recently-updated') return t('sessionHistory.trashBlockedRecentlyUpdated')
+  if (reason === 'not-found') return t('sessionHistory.trashBlockedNotFound')
+  return t('sessionHistory.trashBlockedOutsideDataDir')
+}
+
+type TrashText = (key: string, options?: Record<string, unknown>) => string
+
+function trashSummaryText(summary: SessionTrashSummary, t: TFunction, tBin: TrashText): string {
+  const parts = [tBin('trashResultTrashed', { count: summary.trashed })]
+  if (summary.blocked > 0) parts.push(t('sessionHistory.trashResultBlocked', { count: summary.blocked }))
+  if (summary.failed > 0) parts.push(t('sessionHistory.trashResultFailed', { count: summary.failed }))
+  return parts.join(' · ')
+}
+
+interface TrashDialogState {
+  preview: SessionTrashPreview
+  skippedOpen: number
+  confirming: boolean
+}
+
+interface TrashOutcome {
+  summary: SessionTrashSummary
+  result: SessionTrashResult
+}
+
 export function SessionHistoryModal({
   onClose,
   remoteHostLabel,
@@ -112,21 +156,41 @@ export function SessionHistoryModal({
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [trashBusy, setTrashBusy] = useState(false)
+  const [trashDialog, setTrashDialog] = useState<TrashDialogState | null>(null)
+  const [trashOutcome, setTrashOutcome] = useState<TrashOutcome | null>(null)
   const requestSeq = useRef(0)
+  const listsInFlight = useRef(0)
+  const trashBusyRef = useRef(false)
+  const trashDialogRef = useRef<TrashDialogState | null>(null)
+  const trashDialogElement = useRef<HTMLDivElement | null>(null)
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mounted = useRef(false)
 
   const workspaces = useWorkspace(state => state.workspaces)
   useWorkspace(selectOpenSessionsKey)
+  const binKind = trashBinKind(result?.hostPlatform)
+  const tBin = useCallback<TrashText>(
+    (key, options) => t(trashTextKey(key, binKind), options),
+    [binKind, t],
+  )
 
-  const load = useCallback(async (refresh: boolean) => {
+  const load = useCallback(async (refresh: boolean, background = false) => {
     const seq = ++requestSeq.current
-    setLoading(true)
-    setLoadError(null)
+    listsInFlight.current++
+    if (!background) {
+      setLoading(true)
+      setLoadError(null)
+    }
     try {
-      const next = await host.sessionHistory.list(refresh ? { refresh: true } : undefined)
+      const next = await host.sessionHistory.list(sessionHistoryListOptions(settingsStore.getSettings(), refresh))
       if (seq !== requestSeq.current) return
       setResult(next)
       setNow(Date.now())
+      if (background) {
+        setLoadError(null)
+        return
+      }
       logHistory('list ok', {
         refresh,
         sessions: next.sessions.length,
@@ -138,22 +202,137 @@ export function SessionHistoryModal({
       if (seq !== requestSeq.current) return
       const message = errorText(error)
       setLoadError(message)
-      logHistory('list failed', { refresh, error: message })
+      logHistory('list failed', { refresh, background, error: message })
     } finally {
-      if (seq === requestSeq.current) setLoading(false)
+      listsInFlight.current--
+      if (!background && seq === requestSeq.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    mounted.current = true
     void load(false)
-    return () => { requestSeq.current++ }
+    return () => {
+      mounted.current = false
+      requestSeq.current++
+    }
   }, [load])
+
+  useEffect(() => startSessionHistoryPolling({
+    poll: () => { void load(false, true) },
+    isBusy: () => listsInFlight.current > 0 || trashBusyRef.current,
+    isHidden: () => document.hidden,
+  }), [load])
 
   useEffect(() => () => {
     if (copyTimer.current) clearTimeout(copyTimer.current)
   }, [])
 
-  useEffect(() => listenForModalEscape(window, onClose), [onClose])
+  useEffect(() => {
+    trashDialogRef.current = trashDialog
+  }, [trashDialog])
+
+  const dismiss = useCallback(() => {
+    const action = modalDismissAction({ trashBusy: trashBusyRef.current, dialog: trashDialogRef.current })
+    if (action === 'close-modal') onClose()
+    else if (action === 'close-dialog') setTrashDialog(null)
+  }, [onClose])
+
+  useEffect(() => listenForModalEscape(window, dismiss), [dismiss])
+
+  // Confirming disables both dialog buttons; without this, focus falls back to the page behind the dialog.
+  const trashConfirming = trashDialog?.confirming ?? false
+  useEffect(() => {
+    if (trashConfirming) trashDialogElement.current?.focus()
+  }, [trashConfirming])
+
+  const keepFocusInDialog = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+    const active = document.activeElement
+    if (buttons.length === 0) {
+      event.preventDefault()
+    } else if (event.shiftKey && (active === buttons[0] || active === event.currentTarget)) {
+      event.preventDefault()
+      buttons[buttons.length - 1].focus()
+    } else if (!event.shiftKey && active === buttons[buttons.length - 1]) {
+      event.preventDefault()
+      buttons[0].focus()
+    }
+  }, [])
+
+  const setTrashBusyState = useCallback((busy: boolean) => {
+    trashBusyRef.current = busy
+    setTrashBusy(busy)
+  }, [])
+
+  const requestTrash = useCallback(async (visible: readonly SessionHistoryEntry[]) => {
+    if (trashBusyRef.current) return
+    const selection = selectTrashableSessions(visible, workspaceStore)
+    if (selection.sessions.length === 0) return
+    setActionError(null)
+    setTrashOutcome(null)
+    setTrashBusyState(true)
+    try {
+      const preview = await previewTrashInBatches(selection.sessions, batch => host.sessionHistory.trashPreview(batch))
+      logHistory('trash preview', {
+        requested: selection.sessions.length,
+        skippedOpen: selection.skippedOpen,
+        blocked: preview.blockedCount,
+        fileCount: preview.fileCount,
+        totalBytes: preview.totalBytes,
+      })
+      setTrashDialog({ preview, skippedOpen: selection.skippedOpen, confirming: false })
+    } catch (error) {
+      const message = errorText(error)
+      setActionError(tBin('trashFailed', { error: message }))
+      logHistory('trash preview failed', { requested: selection.sessions.length, error: message })
+    } finally {
+      setTrashBusyState(false)
+    }
+  }, [setTrashBusyState, tBin])
+
+  const confirmTrash = useCallback(async () => {
+    const dialog = trashDialogRef.current
+    if (!dialog || dialog.confirming) return
+    const sessions: SessionRef[] = trashableRefsFromPreview(dialog.preview)
+    if (sessions.length === 0) return
+    const confirming = { ...dialog, confirming: true }
+    trashDialogRef.current = confirming
+    setTrashDialog(confirming)
+    setTrashBusyState(true)
+    try {
+      const { result, batches, rejected } = await trashInBatches(
+        sessions,
+        batch => host.sessionHistory.trash(batch),
+        t('sessionHistory.trashNotAttempted'),
+      )
+      const summary = summarizeTrashResult(result)
+      setTrashOutcome({ summary, result })
+      logHistory('trash done', {
+        requested: sessions.length,
+        batches,
+        rejected,
+        trashed: summary.trashed,
+        blocked: summary.blocked,
+        failed: summary.failed,
+      })
+    } catch (error) {
+      const message = errorText(error)
+      setActionError(tBin('trashFailed', { error: message }))
+      logHistory('trash failed', { requested: sessions.length, error: message })
+    } finally {
+      trashDialogRef.current = null
+      setTrashDialog(null)
+      setTrashBusyState(false)
+      if (mounted.current) void load(false)
+    }
+  }, [load, setTrashBusyState, t, tBin])
+
+  const cancelTrash = useCallback(() => {
+    if (trashDialogRef.current?.confirming) return
+    setTrashDialog(null)
+  }, [])
 
   const caseInsensitive = result?.caseInsensitivePaths ?? true
   const view = useMemo(() => (
@@ -161,6 +340,10 @@ export function SessionHistoryModal({
       ? buildSessionHistoryView(result, { query, agent: agentFilter, sort, onlyNotAdded }, workspaces)
       : []
   ), [result, query, agentFilter, sort, onlyNotAdded, workspaces])
+  const sessionTitles = useMemo(() => new Map(
+    (result?.sessions ?? []).map(entry => [sessionRefKey(entry), entry.title] as const),
+  ), [result])
+  const sessionLabel = (ref: SessionRef) => sessionTitles.get(sessionRefKey(ref)) ?? ref.id
 
   const toggleGroup = useCallback((key: string) => {
     setToggledGroups(prev => {
@@ -183,12 +366,13 @@ export function SessionHistoryModal({
   }, [caseInsensitive, detachedWorkspaceIds, t])
 
   const handleGoToWorkspace = useCallback((workspace: Workspace) => {
-    if (detachedWorkspaceIds.has(workspace.id)) return
+    if (trashBusyRef.current || detachedWorkspaceIds.has(workspace.id)) return
     workspaceStore.setActiveWorkspace(workspace.id)
     onClose()
   }, [detachedWorkspaceIds, onClose])
 
   const handleResume = useCallback((entry: SessionHistoryEntry, group: SessionHistoryGroup) => {
+    if (trashBusyRef.current) return
     setActionError(null)
     const outcome = resumeInWorkspace(workspaceStore, entry, group, caseInsensitive, detachedWorkspaceIds)
     logHistory('resume', { sessionId: entry.id, agent: entry.agent, outcome: outcome.kind })
@@ -248,6 +432,12 @@ export function SessionHistoryModal({
               {entry.agent === 'claude' ? t('sessionHistory.agentClaude') : t('sessionHistory.agentCodex')}
             </span>
             <span className="session-history-card-title" title={entry.title}>{entry.title}</span>
+            {entry.interactive === false && (
+              <span className="session-history-tag">{t('sessionHistory.tagNonInteractive')}</span>
+            )}
+            {entry.archived === true && (
+              <span className="session-history-tag">{t('sessionHistory.tagArchived')}</span>
+            )}
             {owner && <span className="session-history-open-badge">{t('sessionHistory.alreadyOpen')}</span>}
             <span className="session-history-card-time" title={formatAbsoluteTime(entry.updatedAt, t)}>
               {formatRelativeTime(entry.updatedAt, now, t)}
@@ -301,6 +491,15 @@ export function SessionHistoryModal({
               >
                 {copiedKey === commandCopyKey ? t('sessionHistory.copied') : t('sessionHistory.copyResumeCommand')}
               </button>
+              <button
+                type="button"
+                className="session-history-btn danger"
+                disabled={!!owner || trashBusy}
+                title={owner ? tBin('trashOpenInTerminal') : undefined}
+                onClick={() => void requestTrash([entry])}
+              >
+                {tBin('moveToTrash')}
+              </button>
             </div>
             {unavailable && (
               <div className="session-history-card-hint">{resumeReasonText(unavailable, entry, t)}</div>
@@ -318,6 +517,7 @@ export function SessionHistoryModal({
     const collapsed = isDefaultCollapsed(group) !== toggledGroups.has(group.key)
     const addable = canAddGroupAsWorkspace(group)
     const detached = !!workspace && detachedWorkspaceIds.has(workspace.id)
+    const trashable = group.kind === 'missing' ? selectTrashableSessions(sessions, workspaceStore).sessions.length : 0
     return (
       <div key={group.key} className={`session-history-group${group.kind === 'missing' ? ' missing' : ''}`}>
         <div className="session-history-group-head">
@@ -341,6 +541,19 @@ export function SessionHistoryModal({
           </span>
           {group.kind === 'missing' && (
             <span className="session-history-badge warn">⚠ {t('sessionHistory.folderMissing')}</span>
+          )}
+          {group.kind === 'missing' && (
+            <button
+              type="button"
+              className="session-history-btn danger"
+              disabled={trashable === 0 || trashBusy}
+              title={trashable === 0
+                ? t('sessionHistory.trashNothingVisible')
+                : t('sessionHistory.moveAllToTrashHint', { count: trashable })}
+              onClick={() => void requestTrash(sessions)}
+            >
+              {tBin('moveAllToTrash')}
+            </button>
           )}
           {workspace ? (
             <>
@@ -419,8 +632,108 @@ export function SessionHistoryModal({
     return view.map(item => renderGroup(item.group, item.sessions, item.workspace))
   }
 
+  const renderTrashDialog = (dialog: TrashDialogState) => {
+    const { preview, skippedOpen, confirming } = dialog
+    const trashableCount = trashableRefsFromPreview(preview).length
+    const blockedItems = preview.items.filter(item => item.blockedReason !== null)
+    return (
+      <div
+        className="session-history-dialog-backdrop"
+        onMouseDown={event => { if (event.target === event.currentTarget) event.preventDefault() }}
+        onClick={cancelTrash}
+      >
+        <div
+          ref={trashDialogElement}
+          className="session-history-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="session-history-trash-title"
+          tabIndex={-1}
+          onKeyDown={keepFocusInDialog}
+          onClick={event => event.stopPropagation()}
+        >
+          <h3 id="session-history-trash-title">{tBin('trashDialogTitle')}</h3>
+          <p>
+            {trashableCount > 0
+              ? tBin('trashDialogSummary', {
+                count: trashableCount,
+                files: preview.fileCount,
+                size: formatByteSize(preview.totalBytes),
+              })
+              : t('sessionHistory.trashDialogNothing')}
+          </p>
+          <p className="session-history-muted">
+            {remoteHostLabel
+              ? tBin('trashDialogRemote', { host: remoteHostLabel })
+              : tBin('trashDialogLocal')}
+          </p>
+          {skippedOpen > 0 && (
+            <p className="session-history-muted">{t('sessionHistory.trashDialogSkippedOpen', { count: skippedOpen })}</p>
+          )}
+          {blockedItems.length > 0 && (
+            <>
+              <p>{t('sessionHistory.trashDialogBlocked', { count: blockedItems.length })}</p>
+              <ul className="session-history-dialog-list">
+                {blockedItems.map(item => (
+                  <li key={sessionRefKey(item)}>
+                    <span className="session-history-dialog-item-title">{sessionLabel(item)}</span>
+                    <span className="session-history-dialog-item-reason">
+                      {item.blockedReason && trashBlockReasonText(item.blockedReason, t)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          <div className="session-history-dialog-actions">
+            <button type="button" className="session-history-btn" autoFocus disabled={confirming} onClick={cancelTrash}>
+              {t('common.cancel')}
+            </button>
+            <button
+              type="button"
+              className="session-history-btn danger"
+              disabled={confirming || trashableCount === 0}
+              onClick={() => void confirmTrash()}
+            >
+              {confirming ? t('sessionHistory.trashing') : tBin('trashConfirm')}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderTrashOutcome = ({ summary, result: outcome }: TrashOutcome) => (
+    <div className={`session-history-banner ${summary.tone}`}>
+      <div className="session-history-banner-row">
+        <span>{trashSummaryText(summary, t, tBin)}</span>
+        <button
+          type="button"
+          className="session-history-banner-dismiss"
+          onClick={() => setTrashOutcome(null)}
+          title={t('sessionHistory.dismiss')}
+          aria-label={t('sessionHistory.dismiss')}
+        >
+          &times;
+        </button>
+      </div>
+      {(outcome.blocked.length > 0 || outcome.failed.length > 0) && (
+        <ul className="session-history-banner-list">
+          {outcome.blocked.map(item => (
+            <li key={`blocked:${sessionRefKey(item)}`}>
+              {sessionLabel(item)}: {trashBlockReasonText(item.reason, t)}
+            </li>
+          ))}
+          {outcome.failed.map(item => (
+            <li key={`failed:${sessionRefKey(item)}`}>{sessionLabel(item)}: {item.error}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+
   return (
-    <div className="settings-overlay" onClick={onClose}>
+    <div className="settings-overlay" onClick={dismiss}>
       <div
         className="settings-panel session-history-panel"
         role="dialog"
@@ -458,7 +771,7 @@ export function SessionHistoryModal({
           <button
             type="button"
             className="settings-close"
-            onClick={onClose}
+            onClick={dismiss}
             title={t('sessionHistory.close')}
             aria-label={t('sessionHistory.close')}
           >
@@ -513,9 +826,11 @@ export function SessionHistoryModal({
           <div className="session-history-banner warn">⚠ {t('sessionHistory.gitUnavailable')}</div>
         )}
         {actionError && <div className="session-history-banner error">{actionError}</div>}
+        {trashOutcome && renderTrashOutcome(trashOutcome)}
         <div className="session-history-list">
           {renderBody()}
         </div>
+        {trashDialog && renderTrashDialog(trashDialog)}
       </div>
     </div>
   )

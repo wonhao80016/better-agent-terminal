@@ -128,6 +128,8 @@ pub(crate) fn parse_claude_session(path: &Path, max_line_bytes: u64) -> io::Resu
         is_subagent: false,
         parent_id: None,
         skipped_lines,
+        archived: false,
+        owned_paths: Vec::new(),
     })
 }
 

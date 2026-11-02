@@ -269,6 +269,10 @@ async function run() {
           caseInsensitivePaths: true,
         } as unknown as T
       }
+      if (cmd === 'session_history_trash_preview') {
+        return { items: [], fileCount: 0, totalBytes: 0, blockedCount: 0 } as unknown as T
+      }
+      if (cmd === 'session_history_trash') return { trashed: [], blocked: [], failed: [] } as unknown as T
       if (cmd === 'remote_list_profiles') return { error: 'stub' } as unknown as T
       if (cmd === 'tunnel_get_connection') return { error: 'stub' } as unknown as T
       throw new Error(`unexpected invoke: ${cmd}`)
@@ -727,6 +731,16 @@ async function run() {
     assert.deepEqual(history.sessions, [])
     assert.equal(history.caseInsensitivePaths, true)
     await mod.host.sessionHistory.list({ refresh: true })
+    await mod.host.sessionHistory.list({
+      refresh: false, includeNonInteractive: true, includeCodexArchived: true, maxLineBytes: 2 * 1024 * 1024,
+    })
+    // Trash — the client sends session identities only; the host resolves and moves the files.
+    const trashRefs = [{ agent: 'claude' as const, id: 'c-1' }, { agent: 'codex' as const, id: 'x-1' }]
+    assert.deepEqual(
+      await mod.host.sessionHistory.trashPreview(trashRefs),
+      { items: [], fileCount: 0, totalBytes: 0, blockedCount: 0 },
+    )
+    assert.deepEqual(await mod.host.sessionHistory.trash(trashRefs), { trashed: [], blocked: [], failed: [] })
 
     const calledCommands = new Set(invokeCalls.map(call => call.cmd))
     for (const cmd of [
@@ -979,6 +993,20 @@ async function run() {
       { cmd: 'tunnel_get_connection', args: undefined },
       { cmd: 'session_history_list', args: { options: undefined } },
       { cmd: 'session_history_list', args: { options: { refresh: true } } },
+      {
+        cmd: 'session_history_list',
+        args: {
+          options: { refresh: false, includeNonInteractive: true, includeCodexArchived: true, maxLineBytes: 2 * 1024 * 1024 },
+        },
+      },
+      {
+        cmd: 'session_history_trash_preview',
+        args: { sessions: [{ agent: 'claude', id: 'c-1' }, { agent: 'codex', id: 'x-1' }] },
+      },
+      {
+        cmd: 'session_history_trash',
+        args: { sessions: [{ agent: 'claude', id: 'c-1' }, { agent: 'codex', id: 'x-1' }] },
+      },
     ])
   }
 

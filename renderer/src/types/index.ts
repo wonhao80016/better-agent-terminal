@@ -302,6 +302,9 @@ export interface AppSettings {
   autoUpdateEnabled?: boolean;            // Background auto-update: check on launch and install silently (default: false — opt-in)
   updateChannel?: 'stable' | 'pre';       // Auto-update channel; 'pre' requires debug mode (default: 'stable')
   remoteUploadSkipConfirm?: boolean;      // Skip the "file will be uploaded to host" confirm when dropping files in remote mode
+  sessionHistoryIncludeNonInteractive?: boolean;  // Session History lists sdk-cli / exec sessions (default: false)
+  sessionHistoryIncludeCodexArchived?: boolean;   // Session History scans Codex archived_sessions/ (default: false)
+  sessionHistoryMaxLineMiB?: number;              // Session History per-line read cap in MiB (default: 10, min: 1)
 }
 
 // ============================================

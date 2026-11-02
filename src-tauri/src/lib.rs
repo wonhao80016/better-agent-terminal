@@ -224,6 +224,9 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             remote_tunnel_cmd::start_reaper(host_context::HostContext::from_app(
                 app.handle().clone(),
             ));
+            commands::session_history::install_diagnostics(host_context::HostContext::from_app(
+                app.handle().clone(),
+            ));
             if !headless {
                 // Tier 2 is the default: recover from an interrupted swap and
                 // auto-migrate legacy multi-HOME Codex accounts into the unified
@@ -416,6 +419,8 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             claude_cmd::claude_prepare_cli_session,
             claude_cmd::claude_list_sessions,
             session_history_cmd::session_history_list,
+            session_history_cmd::session_history_trash_preview,
+            session_history_cmd::session_history_trash,
             claude_cmd::claude_get_supported_models,
             claude_cmd::claude_get_supported_efforts,
             claude_cmd::claude_get_supported_codex_sandbox_modes,
@@ -548,6 +553,7 @@ fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
 
     let ctx = HostContext::from_headless(std::sync::Arc::new(host));
     crate::commands::remote_tunnel::start_reaper(ctx.clone());
+    crate::commands::session_history::install_diagnostics(ctx.clone());
 
     // Usage is host-owned state, and a remote client paired with a headless host
     // expects 5h/7d numbers here exactly as it would from a desktop host. Started

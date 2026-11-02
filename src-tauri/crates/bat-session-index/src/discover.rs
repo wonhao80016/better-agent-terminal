@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) const CODEX_SESSIONS_DIR: &str = "sessions";
+pub(crate) const CODEX_ARCHIVED_DIR: &str = "archived_sessions";
+
 /// Only `<projects>/<project>/<id>.jsonl` are sessions; deeper files belong to subagents or tool output.
 pub(crate) fn list_claude_transcripts(claude_home: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -18,10 +21,17 @@ pub(crate) fn list_claude_transcripts(claude_home: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Archived sessions are excluded in Phase 1.
 pub(crate) fn list_codex_rollouts(codex_home: &Path) -> Vec<PathBuf> {
+    list_rollouts_under(codex_home.join(CODEX_SESSIONS_DIR))
+}
+
+pub(crate) fn list_codex_archived_rollouts(codex_home: &Path) -> Vec<PathBuf> {
+    list_rollouts_under(codex_home.join(CODEX_ARCHIVED_DIR))
+}
+
+fn list_rollouts_under(root: PathBuf) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let mut pending = vec![codex_home.join("sessions")];
+    let mut pending = vec![root];
     while let Some(dir) = pending.pop() {
         for entry in read_dir_safe(&dir) {
             if entry.is_dir {
@@ -79,5 +89,6 @@ mod tests {
         let codex = list_codex_rollouts(&fixture(&["codex"]));
         assert_eq!(codex.len(), 7);
         assert!(list_claude_transcripts(&fixture(&["nope"])).is_empty());
+        assert!(list_codex_archived_rollouts(&fixture(&["codex"])).is_empty());
     }
 }

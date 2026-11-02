@@ -373,7 +373,13 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         // host-wide rather than per session — the page slices by model and effort
         // across every session the host has run.
         "agent:latency-samples" => Some(&["fromMs", "toMs"]),
-        "session-history:list" => Some(&["refresh"]),
+        "session-history:list" => Some(&[
+            "refresh",
+            "includeNonInteractive",
+            "includeCodexArchived",
+            "maxLineBytes",
+        ]),
+        "session-history:trash-preview" | "session-history:trash" => Some(&["sessions"]),
         "claude:auth-login-submit-code" => Some(&["code", "loginId"]),
         "claude:auth-login-cancel" => Some(&["loginId"]),
         "claude:prepare-cli-session" => Some(&[
@@ -1194,6 +1200,39 @@ mod tests {
         );
         assert_eq!(legacy_v1_args_to_params(channel, &[]), Value::Null);
         assert!(!is_proxied_remote_event(channel));
+    }
+
+    #[test]
+    fn session_history_list_maps_every_positional_option() {
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "session-history:list",
+                &[json!(true), json!(true), json!(false), json!(2_097_152)]
+            ),
+            json!({
+                "refresh": true,
+                "includeNonInteractive": true,
+                "includeCodexArchived": false,
+                "maxLineBytes": 2_097_152
+            })
+        );
+    }
+
+    #[test]
+    fn session_history_trash_channels_map_positional_sessions() {
+        let sessions = json!([{ "agent": "claude", "id": "a" }]);
+        for channel in ["session-history:trash-preview", "session-history:trash"] {
+            assert_eq!(canonical_remote_channel(channel), channel);
+            assert_eq!(
+                legacy_v1_args_to_params(channel, std::slice::from_ref(&sessions)),
+                json!({ "sessions": sessions })
+            );
+            assert_eq!(
+                legacy_v1_args_to_params(channel, &[json!({ "sessions": sessions })]),
+                json!({ "sessions": sessions })
+            );
+            assert!(!is_proxied_remote_event(channel));
+        }
     }
 
     #[test]

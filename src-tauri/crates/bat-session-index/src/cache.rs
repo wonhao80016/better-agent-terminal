@@ -38,17 +38,32 @@ pub(crate) fn mtime_ns(modified: SystemTime) -> i64 {
 
 /// Any unreadable, malformed, or mismatched cache yields an empty map rather than an error.
 pub(crate) fn load_cache(path: &Path, max_line_bytes: u64) -> HashMap<String, CacheEntry> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    match serde_json::from_str::<CacheFile>(&text) {
-        Ok(file)
-            if file.version == CACHE_SCHEMA_VERSION && file.max_line_bytes == max_line_bytes =>
-        {
-            file.entries
-        }
+    match load_cache_any_limit(path) {
+        Some((limit, entries)) if limit == max_line_bytes => entries,
         _ => HashMap::new(),
     }
+}
+
+/// Returns the entries with the line limit they were parsed under; None for an unusable cache.
+pub(crate) fn load_cache_any_limit(path: &Path) -> Option<(u64, HashMap<String, CacheEntry>)> {
+    let text = fs::read_to_string(path).ok()?;
+    let file = serde_json::from_str::<CacheFile>(&text).ok()?;
+    (file.version == CACHE_SCHEMA_VERSION).then_some((file.max_line_bytes, file.entries))
+}
+
+/// Drops the given keys and rewrites the cache only when one of them was present.
+pub(crate) fn forget_cache_entries(path: &Path, keys: &[String]) -> io::Result<usize> {
+    let Some((limit, mut entries)) = load_cache_any_limit(path) else {
+        return Ok(0);
+    };
+    let removed = keys
+        .iter()
+        .filter(|key| entries.remove(key.as_str()).is_some())
+        .count();
+    if removed > 0 {
+        save_cache(path, limit, entries)?;
+    }
+    Ok(removed)
 }
 
 /// Writes through a uniquely named temp file and a rename so readers never see a partial cache.
@@ -113,6 +128,22 @@ mod tests {
         assert!(load_cache(&dir.path().join("absent.json"), 100).is_empty());
         let leftovers = fs::read_dir(path.parent().unwrap()).unwrap().count();
         assert_eq!(leftovers, 1);
+    }
+
+    #[test]
+    fn forgetting_entries_keeps_the_stored_limit_and_other_entries() {
+        let dir = TempDir::new("cache-forget");
+        let path = dir.path().join("index-v1.json");
+        assert_eq!(forget_cache_entries(&path, &["a".to_string()]).unwrap(), 0);
+        let entries = HashMap::from([("a".to_string(), entry()), ("b".to_string(), entry())]);
+        save_cache(&path, 300, entries).unwrap();
+        assert_eq!(
+            forget_cache_entries(&path, &["a".to_string(), "x".to_string()]).unwrap(),
+            1
+        );
+        let (limit, left) = load_cache_any_limit(&path).unwrap();
+        assert_eq!(limit, 300);
+        assert_eq!(left.keys().collect::<Vec<_>>(), vec!["b"]);
     }
 
     #[test]

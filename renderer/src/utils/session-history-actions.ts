@@ -1,10 +1,15 @@
-import type { TerminalInstance, Workspace } from '../types'
+import type { AppSettings, TerminalInstance, Workspace } from '../types'
 import type { AgentPresetId } from '../types/agent-presets'
 import type {
+  HostPlatform,
   SessionAgent,
   SessionHistoryEntry,
   SessionHistoryGroup,
+  SessionHistoryListOptions,
   SessionHistoryResult,
+  SessionRef,
+  SessionTrashPreview,
+  SessionTrashResult,
 } from '../types/session-history'
 
 export type SessionHistoryAgentFilter = 'all' | SessionAgent
@@ -43,6 +48,51 @@ export type ResumeOutcome =
   | { kind: 'created'; terminalId: string; workspaceId: string }
   | { kind: 'unavailable'; reason: ResumeUnavailableReason }
 
+export type SessionHistoryScanSettings = Pick<
+  AppSettings,
+  'sessionHistoryIncludeNonInteractive' | 'sessionHistoryIncludeCodexArchived' | 'sessionHistoryMaxLineMiB'
+>
+
+export interface IntervalTimers {
+  setInterval(handler: () => void, ms: number): unknown
+  clearInterval(handle: unknown): void
+}
+
+export interface SessionHistoryPollingOptions {
+  poll(): void
+  isBusy(): boolean
+  isHidden(): boolean
+  intervalMs?: number
+  timers?: IntervalTimers
+}
+
+export interface SessionTrashSelection {
+  sessions: SessionRef[]
+  skippedOpen: number
+}
+
+export interface SessionTrashSummary {
+  trashed: number
+  blocked: number
+  failed: number
+  tone: 'ok' | 'warn' | 'error'
+}
+
+export const SESSION_HISTORY_POLL_INTERVAL_MS = 10_000
+export const SESSION_HISTORY_DEFAULT_MAX_LINE_MIB = 10
+export const SESSION_HISTORY_MIN_MAX_LINE_MIB = 1
+// Same [1 MiB, 1 GiB] range the host clamps to.
+export const SESSION_HISTORY_MAX_MAX_LINE_MIB = 1024
+// Must match MAX_TRASH_SESSIONS_PER_REQUEST in bat-session-index; the host rejects larger requests.
+export const SESSION_TRASH_MAX_PER_REQUEST = 200
+const BYTES_PER_MIB = 1024 * 1024
+const SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
+
+const DEFAULT_INTERVAL_TIMERS: IntervalTimers = {
+  setInterval: (handler, ms) => setInterval(handler, ms),
+  clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>),
+}
+
 const NO_DETACHED_WORKSPACES: ReadonlySet<string> = new Set()
 // Must match is_valid_session_id in bat-session-index; the id is pasted into a shell.
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -71,6 +121,183 @@ export function normalizeHostPath(path: string, caseInsensitive: boolean): strin
 
 export function sessionAgentPreset(agent: SessionAgent): AgentPresetId {
   return agent === 'claude' ? 'claude-code' : 'codex-agent'
+}
+
+/** Whole MiB within [1, 1024]; anything unparseable falls back to the default. */
+export function normalizeSessionHistoryMaxLineMiB(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return SESSION_HISTORY_DEFAULT_MAX_LINE_MIB
+  return Math.min(SESSION_HISTORY_MAX_MAX_LINE_MIB, Math.max(SESSION_HISTORY_MIN_MAX_LINE_MIB, Math.floor(value)))
+}
+
+export function sessionHistoryListOptions(
+  settings: SessionHistoryScanSettings,
+  refresh: boolean,
+): SessionHistoryListOptions {
+  return {
+    refresh,
+    includeNonInteractive: settings.sessionHistoryIncludeNonInteractive === true,
+    includeCodexArchived: settings.sessionHistoryIncludeCodexArchived === true,
+    maxLineBytes: normalizeSessionHistoryMaxLineMiB(settings.sessionHistoryMaxLineMiB) * BYTES_PER_MIB,
+  }
+}
+
+/** Skips a tick while a request is in flight or the document is hidden. Returns the stopper. */
+export function startSessionHistoryPolling(options: SessionHistoryPollingOptions): () => void {
+  const timers = options.timers ?? DEFAULT_INTERVAL_TIMERS
+  let stopped = false
+  const handle = timers.setInterval(() => {
+    if (stopped || options.isBusy() || options.isHidden()) return
+    options.poll()
+  }, options.intervalMs ?? SESSION_HISTORY_POLL_INTERVAL_MS)
+  return () => {
+    if (stopped) return
+    stopped = true
+    timers.clearInterval(handle)
+  }
+}
+
+export function sessionRefKey(ref: SessionRef): string {
+  return `${ref.agent}:${ref.id}`
+}
+
+export function isSessionOpenInTerminal(
+  store: Pick<SessionHistoryWorkspaceStore, 'findSdkSessionOwner'>,
+  entry: Pick<SessionHistoryEntry, 'agent' | 'id'>,
+): boolean {
+  return !!store.findSdkSessionOwner(entry.id, sessionAgentPreset(entry.agent))
+}
+
+/** Sessions open in a terminal are left out because their transcripts are still being written. */
+export function selectTrashableSessions(
+  visible: readonly SessionHistoryEntry[],
+  store: Pick<SessionHistoryWorkspaceStore, 'findSdkSessionOwner'>,
+): SessionTrashSelection {
+  const sessions: SessionRef[] = []
+  let skippedOpen = 0
+  for (const entry of visible) {
+    if (isSessionOpenInTerminal(store, entry)) skippedOpen++
+    else sessions.push({ agent: entry.agent, id: entry.id })
+  }
+  return { sessions, skippedOpen }
+}
+
+export function trashableRefsFromPreview(preview: SessionTrashPreview): SessionRef[] {
+  return preview.items
+    .filter(item => item.blockedReason === null)
+    .map(item => ({ agent: item.agent, id: item.id }))
+}
+
+/** Splits into host-sized batches, dropping repeated sessions. */
+export function chunkSessionRefs(
+  refs: readonly SessionRef[],
+  size: number = SESSION_TRASH_MAX_PER_REQUEST,
+): SessionRef[][] {
+  const seen = new Set<string>()
+  const unique = refs.filter(ref => {
+    const key = sessionRefKey(ref)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  const batches: SessionRef[][] = []
+  for (let start = 0; start < unique.length; start += size) batches.push(unique.slice(start, start + size))
+  return batches
+}
+
+/** Previews batch by batch and merges the results; any rejected batch rejects the whole preview. */
+export async function previewTrashInBatches(
+  sessions: readonly SessionRef[],
+  preview: (batch: SessionRef[]) => Promise<SessionTrashPreview>,
+  size: number = SESSION_TRASH_MAX_PER_REQUEST,
+): Promise<SessionTrashPreview> {
+  const merged: SessionTrashPreview = { items: [], fileCount: 0, totalBytes: 0, blockedCount: 0 }
+  for (const batch of chunkSessionRefs(sessions, size)) {
+    const part = await preview(batch)
+    merged.items.push(...part.items)
+    merged.fileCount += part.fileCount
+    merged.totalBytes += part.totalBytes
+    merged.blockedCount += part.blockedCount
+  }
+  return merged
+}
+
+export interface BatchedTrashOutcome {
+  result: SessionTrashResult
+  batches: number
+  rejected: boolean
+}
+
+/**
+ * Moves batch by batch and never rejects. A rejected batch counts all of its sessions as failed with the rejection
+ * message and stops: the host may still be working on a request that timed out. Later sessions fail as `notAttempted`.
+ */
+export async function trashInBatches(
+  sessions: readonly SessionRef[],
+  trash: (batch: SessionRef[]) => Promise<SessionTrashResult>,
+  notAttempted: string,
+  size: number = SESSION_TRASH_MAX_PER_REQUEST,
+): Promise<BatchedTrashOutcome> {
+  const result: SessionTrashResult = { trashed: [], blocked: [], failed: [] }
+  const batches = chunkSessionRefs(sessions, size)
+  for (let index = 0; index < batches.length; index++) {
+    try {
+      const part = await trash(batches[index])
+      result.trashed.push(...part.trashed)
+      result.blocked.push(...part.blocked)
+      result.failed.push(...part.failed)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      result.failed.push(...batches[index].map(ref => ({ ...ref, error: message })))
+      for (const later of batches.slice(index + 1).flat()) result.failed.push({ ...later, error: notAttempted })
+      return { result, batches: index + 1, rejected: true }
+    }
+  }
+  return { result, batches: batches.length, rejected: false }
+}
+
+export type TrashBinKind = 'recycle-bin' | 'trash'
+
+/** Hosts that predate `hostPlatform` are treated as Windows, the wording those builds already used. */
+export function trashBinKind(hostPlatform: HostPlatform | null | undefined): TrashBinKind {
+  return hostPlatform === 'macos' || hostPlatform === 'linux' ? 'trash' : 'recycle-bin'
+}
+
+/** Trash wording lives under `sessionHistory.osTrash.*` with the same key names as the Recycle Bin wording. */
+export function trashTextKey(key: string, kind: TrashBinKind): string {
+  return kind === 'trash' ? `sessionHistory.osTrash.${key}` : `sessionHistory.${key}`
+}
+
+export type ModalDismissAction = 'close-modal' | 'close-dialog' | 'ignore'
+
+/** A pending preview or a running move keeps the modal open so its result is not lost. */
+export function modalDismissAction(state: {
+  trashBusy: boolean
+  dialog: { confirming: boolean } | null
+}): ModalDismissAction {
+  if (state.dialog) return state.dialog.confirming ? 'ignore' : 'close-dialog'
+  return state.trashBusy ? 'ignore' : 'close-modal'
+}
+
+export function summarizeTrashResult(result: SessionTrashResult): SessionTrashSummary {
+  const trashed = result.trashed.length
+  const blocked = result.blocked.length
+  const failed = result.failed.length
+  let tone: SessionTrashSummary['tone'] = 'ok'
+  if (failed > 0 && trashed === 0) tone = 'error'
+  else if (failed > 0 || blocked > 0) tone = 'warn'
+  return { trashed, blocked, failed, tone }
+}
+
+export function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < SIZE_UNITS.length - 1) {
+    value /= 1024
+    unit++
+  }
+  const digits = unit === 0 || value >= 100 ? 0 : 1
+  return `${value.toFixed(digits)} ${SIZE_UNITS[unit]}`
 }
 
 export function isValidSessionId(id: string): boolean {

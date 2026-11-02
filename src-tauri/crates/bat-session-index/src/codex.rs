@@ -174,6 +174,8 @@ pub(crate) fn parse_codex_session(
         is_subagent,
         parent_id,
         skipped_lines: state.skipped_lines,
+        archived: false,
+        owned_paths: Vec::new(),
     }))
 }
 

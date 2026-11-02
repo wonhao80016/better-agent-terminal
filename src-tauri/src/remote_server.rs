@@ -3182,6 +3182,10 @@ fn invoke_rust_for_remote(
             .map_err(|err| format!("{channel} serialization failed: {err}"))
         }),
         "session-history:list" => session_history_cmd::list_for_remote(ctx, params),
+        "session-history:trash-preview" => {
+            session_history_cmd::trash_preview_for_remote(ctx, params)
+        }
+        "session-history:trash" => session_history_cmd::trash_for_remote(ctx, params),
         "claude:archive-messages" => {
             string_param(params, "sessionId", channel).and_then(|session_id| {
                 let messages = params.get("messages").cloned().unwrap_or(Value::Null);
@@ -4005,7 +4009,9 @@ fn remote_invoke_timeout(channel: &str) -> Duration {
         | "claude:fork-session"
         | "runtime:install"
         | "runtime:clear-managed" => SESSION_INVOKE_TIMEOUT,
-        "session-history:list" => session_history_cmd::REMOTE_TIMEOUT,
+        "session-history:list"
+        | "session-history:trash-preview"
+        | "session-history:trash" => session_history_cmd::REMOTE_TIMEOUT,
         _ => INVOKE_TIMEOUT,
     }
 }
@@ -4124,7 +4130,86 @@ mod tests {
             remote_invoke_timeout(channel),
             session_history_cmd::REMOTE_TIMEOUT
         );
+
+        let filtered = session_history_cmd::list_value(
+            &sources,
+            &legacy_v1_args_to_params(
+                channel,
+                &[json!(false), json!(true), json!(true), json!(2_097_152)],
+            ),
+        )
+        .unwrap();
+        let filtered_sessions = filtered["sessions"].as_array().unwrap();
+        assert!(filtered_sessions.len() > sessions.len());
+        assert!(filtered_sessions
+            .iter()
+            .all(|s| s["interactive"].is_boolean() && s["archived"].is_boolean()));
         let _ = fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn session_history_trash_arms_take_session_refs_and_return_contract_shapes() {
+        use session_history_cmd::test_support::{preview_value, trash_value, RecordingTrash};
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates")
+            .join("bat-session-index")
+            .join("fixtures");
+        let sources = session_history_cmd::ScanSources {
+            claude_home: Some(fixtures.join("claude")),
+            codex_home: Some(fixtures.join("codex")),
+            data_dir: None,
+        };
+        let refs = json!([
+            { "agent": "codex", "id": "0aaaaaaa-0000-7000-8000-000000000001" },
+            { "agent": "claude", "id": "not-a-session" }
+        ]);
+        let later = || std::time::SystemTime::now() + Duration::from_secs(24 * 60 * 60);
+
+        let preview_channel = "session-history:trash-preview";
+        let preview = preview_value(
+            &sources,
+            &legacy_v1_args_to_params(preview_channel, std::slice::from_ref(&refs)),
+            later(),
+        )
+        .unwrap();
+        let mut keys: Vec<&String> = preview.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["blockedCount", "fileCount", "items", "totalBytes"]);
+        assert_eq!(preview["items"][0]["agent"], json!("codex"));
+        assert!(preview["items"][0]["blockedReason"].is_null());
+        assert!(preview["items"][0]["fileCount"].as_u64().unwrap() >= 2);
+        assert_eq!(preview["items"][1]["blockedReason"], json!("not-found"));
+        assert_eq!(preview["blockedCount"], json!(1));
+
+        let trash_channel = "session-history:trash";
+        let backend = RecordingTrash::default();
+        let outcome = trash_value(
+            &sources,
+            &legacy_v1_args_to_params(trash_channel, &[json!({ "sessions": refs })]),
+            &later,
+            &backend,
+        )
+        .unwrap();
+        assert_eq!(outcome["trashed"], json!([]));
+        assert_eq!(outcome["blocked"][0]["reason"], json!("not-found"));
+        assert_eq!(
+            outcome["failed"][0]["id"],
+            json!("0aaaaaaa-0000-7000-8000-000000000001")
+        );
+        assert_eq!(backend.calls.borrow().len(), 1);
+
+        assert!(preview_value(
+            &sources,
+            &legacy_v1_args_to_params(preview_channel, &[]),
+            later()
+        )
+        .is_err());
+        for channel in [preview_channel, trash_channel] {
+            assert_eq!(
+                remote_invoke_timeout(channel),
+                session_history_cmd::REMOTE_TIMEOUT
+            );
+        }
     }
 
     #[test]

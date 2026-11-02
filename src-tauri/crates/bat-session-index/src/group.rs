@@ -139,6 +139,8 @@ mod tests {
             is_subagent: false,
             parent_id: None,
             skipped_lines: 0,
+            archived: false,
+            owned_paths: Vec::new(),
         }
     }
 

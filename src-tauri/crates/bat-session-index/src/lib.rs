@@ -3,6 +3,7 @@
 mod cache;
 mod claude;
 mod codex;
+mod diagnostics;
 mod dir_probe;
 mod discover;
 mod finalize;
@@ -13,11 +14,17 @@ mod model;
 mod paths;
 mod text;
 mod time;
+mod trash;
+#[cfg(windows)]
+mod windows_recycle;
+#[cfg(windows)]
+mod windows_recycle_settings;
 
 #[cfg(test)]
 mod test_support;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,10 +38,18 @@ use crate::dir_probe::DirState;
 use crate::group::{group_sessions, GroupContext};
 use crate::model::{is_valid_session_id, SessionRecord};
 
+pub use crate::diagnostics::set_diagnostic_sink;
 pub use crate::paths::{normalize_host_path, normalize_path, PathStyle};
+pub use crate::trash::{
+    trash_preview, trash_sessions, BlockedSession, FailedSession, SessionRef, SessionTrashPreview,
+    SessionTrashPreviewItem, SessionTrashResult, SystemTrash, TrashBackend, TrashBlockReason,
+    MAX_TRASH_SESSIONS_PER_REQUEST, RECENT_ACTIVITY_WINDOW,
+};
 
 pub const DEFAULT_MAX_LINE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MIN_MAX_LINE_BYTES: u64 = 1024 * 1024;
+/// A line up to this size is buffered whole by each parse worker.
+pub const MAX_MAX_LINE_BYTES: u64 = 1024 * 1024 * 1024;
 const PARSE_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -42,6 +57,28 @@ const PARSE_CONCURRENCY: usize = 4;
 pub enum SessionAgent {
     Claude,
     Codex,
+}
+
+/// Operating system of the host whose trash receives moved sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostPlatform {
+    Windows,
+    Macos,
+    Linux,
+}
+
+impl HostPlatform {
+    /// Other Unix hosts use the freedesktop trash and are reported as Linux.
+    pub fn current() -> Self {
+        if cfg!(windows) {
+            HostPlatform::Windows
+        } else if cfg!(target_os = "macos") {
+            HostPlatform::Macos
+        } else {
+            HostPlatform::Linux
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +108,10 @@ pub struct SessionHistoryEntry {
     pub updated_at: Option<String>,
     pub group_key: String,
     pub skipped_lines: u32,
+    /// False for Claude `sdk-cli` and Codex `exec` sessions.
+    pub interactive: bool,
+    /// True when the transcript lives under Codex `archived_sessions/`.
+    pub archived: bool,
 }
 
 impl SessionHistoryEntry {
@@ -91,6 +132,8 @@ impl SessionHistoryEntry {
             updated_at: record.updated_at,
             group_key,
             skipped_lines: record.skipped_lines,
+            interactive: record.interactive,
+            archived: record.archived,
         }
     }
 }
@@ -128,6 +171,9 @@ pub struct SessionHistoryResult {
     pub groups: Vec<SessionHistoryGroup>,
     pub scan: SessionHistoryScanStatus,
     pub case_insensitive_paths: bool,
+    /// None when the result came from a host that predates this field.
+    #[serde(default)]
+    pub host_platform: Option<HostPlatform>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,14 +184,18 @@ pub struct ScanOptions {
     pub codex_home: Option<PathBuf>,
     /// None disables the persistent cache.
     pub cache_path: Option<PathBuf>,
-    /// Clamped to at least [`MIN_MAX_LINE_BYTES`].
+    /// Clamped to [`MIN_MAX_LINE_BYTES`, `MAX_MAX_LINE_BYTES`].
     pub max_line_bytes: u64,
     /// Manual refresh: re-runs git for directories that were not repositories and re-probes cached UNC folders.
     pub retry_git_misses: bool,
+    /// Lists Claude `sdk-cli` and Codex `exec` sessions as well.
+    pub include_non_interactive: bool,
+    /// Also scans `<codexHome>/archived_sessions/`.
+    pub include_codex_archived: bool,
 }
 
 impl Default for ScanOptions {
-    /// `~/.claude` and `$CODEX_HOME` (else `~/.codex`), no persistent cache.
+    /// `$CLAUDE_CONFIG_DIR` (else `~/.claude`) and `$CODEX_HOME` (else `~/.codex`), no persistent cache.
     fn default() -> Self {
         let home = home_dir();
         let codex_home = std::env::var_os("CODEX_HOME")
@@ -153,13 +203,26 @@ impl Default for ScanOptions {
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|h| h.join(".codex")));
         ScanOptions {
-            claude_home: home.map(|h| h.join(".claude")),
+            claude_home: resolve_claude_home(
+                std::env::var_os("CLAUDE_CONFIG_DIR"),
+                home.as_deref(),
+            ),
             codex_home,
             cache_path: None,
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             retry_git_misses: false,
+            include_non_interactive: false,
+            include_codex_archived: false,
         }
     }
+}
+
+/// Claude Code reads its data from `$CLAUDE_CONFIG_DIR` when set and non-empty, else `~/.claude`.
+pub fn resolve_claude_home(config_dir: Option<OsString>, home: Option<&Path>) -> Option<PathBuf> {
+    config_dir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".claude")))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -169,10 +232,11 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     Claude,
     Codex,
+    CodexArchived,
 }
 
 enum JobOutcome {
@@ -186,9 +250,58 @@ enum JobOutcome {
 /// the scan status instead of failing the call. The caller must serialize calls.
 pub fn scan(opts: &ScanOptions) -> SessionHistoryResult {
     let started = Instant::now();
-    let max_line_bytes = opts.max_line_bytes.max(MIN_MAX_LINE_BYTES);
+    let max_line_bytes = clamp_max_line_bytes(opts.max_line_bytes);
     let style = PathStyle::host();
+    let previous = opts
+        .cache_path
+        .as_deref()
+        .map(|path| load_cache(path, max_line_bytes))
+        .unwrap_or_default();
 
+    let collected = collect(opts, max_line_bytes, opts.include_codex_archived, &previous);
+    let mut status = collected.status;
+    // Unchanged hits covering every previous entry mean the file on disk is already current.
+    let cache_changed = status.parsed_count > 0 || status.cache_hits as usize != previous.len();
+    if let (Some(path), true) = (&opts.cache_path, cache_changed) {
+        let _ = save_cache(path, max_line_bytes, collected.entries);
+    }
+
+    let sessions = finalize::finalize_sessions(
+        collected.records,
+        &collected.codex_titles,
+        opts.include_non_interactive,
+    );
+    let (sessions, groups, git_available) = group_with_git(sessions, style, opts.retry_git_misses);
+    status.git_available = git_available;
+    status.duration_ms = started.elapsed().as_millis() as u64;
+    status.scanned_at = time::now_iso_utc();
+    SessionHistoryResult {
+        sessions,
+        groups,
+        scan: status,
+        case_insensitive_paths: style.case_insensitive(),
+        host_platform: Some(HostPlatform::current()),
+    }
+}
+
+pub fn clamp_max_line_bytes(bytes: u64) -> u64 {
+    bytes.clamp(MIN_MAX_LINE_BYTES, MAX_MAX_LINE_BYTES)
+}
+
+pub(crate) struct Collected {
+    pub records: Vec<SessionRecord>,
+    pub codex_titles: HashMap<String, String>,
+    pub status: SessionHistoryScanStatus,
+    pub entries: HashMap<String, CacheEntry>,
+}
+
+/// Discovers and parses transcripts, reusing `previous` entries whose mtime and size still match.
+pub(crate) fn collect(
+    opts: &ScanOptions,
+    max_line_bytes: u64,
+    include_codex_archived: bool,
+    previous: &HashMap<String, CacheEntry>,
+) -> Collected {
     let mut jobs: Vec<(PathBuf, SourceKind)> = Vec::new();
     if let Some(home) = &opts.claude_home {
         jobs.extend(
@@ -204,17 +317,19 @@ pub fn scan(opts: &ScanOptions) -> SessionHistoryResult {
                     .into_iter()
                     .map(|p| (p, SourceKind::Codex)),
             );
+            if include_codex_archived {
+                jobs.extend(
+                    discover::list_codex_archived_rollouts(home)
+                        .into_iter()
+                        .map(|p| (p, SourceKind::CodexArchived)),
+                );
+            }
             codex::read_codex_title_index(&home.join("session_index.jsonl"), max_line_bytes)
         }
         None => HashMap::new(),
     };
-    let previous = opts
-        .cache_path
-        .as_deref()
-        .map(|path| load_cache(path, max_line_bytes))
-        .unwrap_or_default();
 
-    let outcomes = run_jobs(&jobs, &previous, max_line_bytes);
+    let outcomes = run_jobs(&jobs, previous, max_line_bytes);
 
     let mut status = SessionHistoryScanStatus {
         file_count: jobs.len() as u32,
@@ -226,45 +341,33 @@ pub fn scan(opts: &ScanOptions) -> SessionHistoryResult {
         scanned_at: String::new(),
         git_available: false,
     };
-    let mut next_entries: HashMap<String, CacheEntry> = HashMap::with_capacity(outcomes.len());
+    let mut entries: HashMap<String, CacheEntry> = HashMap::with_capacity(outcomes.len());
     for outcome in outcomes {
         match outcome {
             JobOutcome::Vanished => {}
             JobOutcome::Failed => status.failed_count += 1,
             JobOutcome::Hit(path, entry) => {
                 status.cache_hits += 1;
-                next_entries.insert(path, entry);
+                entries.insert(path, entry);
             }
             JobOutcome::Parsed(path, entry) => {
                 status.parsed_count += 1;
-                next_entries.insert(path, entry);
+                entries.insert(path, entry);
             }
         }
     }
     // Ids reach shell commands the user copies, so a file with an unsafe id is reported as failed, not listed.
-    let (records, rejected): (Vec<SessionRecord>, Vec<SessionRecord>) = next_entries
+    let (records, rejected): (Vec<SessionRecord>, Vec<SessionRecord>) = entries
         .values()
         .filter_map(|entry| entry.record.clone())
         .partition(|record| is_valid_session_id(&record.id));
     status.failed_count += rejected.len() as u32;
     status.skipped_lines = records.iter().map(|r| r.skipped_lines).sum();
-
-    // Unchanged hits covering every previous entry mean the file on disk is already current.
-    let cache_changed = status.parsed_count > 0 || status.cache_hits as usize != previous.len();
-    if let (Some(path), true) = (&opts.cache_path, cache_changed) {
-        let _ = save_cache(path, max_line_bytes, next_entries);
-    }
-
-    let sessions = finalize::finalize_sessions(records, &codex_titles);
-    let (sessions, groups, git_available) = group_with_git(sessions, style, opts.retry_git_misses);
-    status.git_available = git_available;
-    status.duration_ms = started.elapsed().as_millis() as u64;
-    status.scanned_at = time::now_iso_utc();
-    SessionHistoryResult {
-        sessions,
-        groups,
-        scan: status,
-        case_insensitive_paths: style.case_insensitive(),
+    Collected {
+        records,
+        codex_titles,
+        status,
+        entries,
     }
 }
 
@@ -305,24 +408,33 @@ fn run_job(
     let mtime = meta.modified().map(mtime_ns).unwrap_or(0);
     let size = meta.len();
     let key = path.to_string_lossy().into_owned();
+    let archived = kind == SourceKind::CodexArchived;
+    let mark = |mut entry: CacheEntry| {
+        if let Some(record) = &mut entry.record {
+            record.archived = archived;
+        }
+        entry
+    };
     if let Some(entry) = previous
         .get(&key)
         .filter(|e| e.mtime_ns == mtime && e.size == size)
     {
-        return JobOutcome::Hit(key, entry.clone());
+        return JobOutcome::Hit(key, mark(entry.clone()));
     }
     let parsed = match kind {
         SourceKind::Claude => claude::parse_claude_session(path, max_line_bytes).map(Some),
-        SourceKind::Codex => codex::parse_codex_session(path, max_line_bytes),
+        SourceKind::Codex | SourceKind::CodexArchived => {
+            codex::parse_codex_session(path, max_line_bytes)
+        }
     };
     match parsed {
         Ok(record) => JobOutcome::Parsed(
             key,
-            CacheEntry {
+            mark(CacheEntry {
                 mtime_ns: mtime,
                 size,
                 record,
-            },
+            }),
         ),
         Err(_) => JobOutcome::Failed,
     }
@@ -387,6 +499,8 @@ mod tests {
                 cache_path: None,
                 max_line_bytes: DEFAULT_MAX_LINE_BYTES,
                 retry_git_misses: false,
+                include_non_interactive: false,
+                include_codex_archived: false,
             }
         }
 
@@ -423,6 +537,7 @@ mod tests {
             result.case_insensitive_paths,
             PathStyle::host().case_insensitive()
         );
+        assert_eq!(result.host_platform, Some(HostPlatform::current()));
     }
 
     #[test]
@@ -465,6 +580,108 @@ mod tests {
                 "{hidden} should be hidden"
             );
         }
+    }
+
+    #[test]
+    fn options_default_to_interactive_unarchived_sessions() {
+        let opts = ScanOptions::default();
+        assert!(!opts.include_non_interactive);
+        assert!(!opts.include_codex_archived);
+        assert_eq!(opts.max_line_bytes, DEFAULT_MAX_LINE_BYTES);
+    }
+
+    #[test]
+    fn claude_home_prefers_non_empty_config_dir() {
+        let home = Path::new("home");
+        assert_eq!(
+            resolve_claude_home(Some(OsString::from("custom")), Some(home)),
+            Some(PathBuf::from("custom"))
+        );
+        assert_eq!(
+            resolve_claude_home(Some(OsString::new()), Some(home)),
+            Some(home.join(".claude"))
+        );
+        assert_eq!(
+            resolve_claude_home(None, Some(home)),
+            Some(home.join(".claude"))
+        );
+        assert_eq!(resolve_claude_home(None, None), None);
+        assert_eq!(
+            resolve_claude_home(Some(OsString::from("custom")), None),
+            Some(PathBuf::from("custom"))
+        );
+    }
+
+    #[test]
+    fn non_interactive_sessions_are_listed_on_request() {
+        let data = Data::new("scan-non-interactive");
+        let result = scan(&ScanOptions {
+            include_non_interactive: true,
+            ..data.options()
+        });
+        let flags: Vec<(&str, bool)> = result
+            .sessions
+            .iter()
+            .map(|s| (s.id.as_str(), s.interactive))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                (CODEX_PAGED_ID, true),
+                ("33333333-aaaa-4bbb-8ccc-000000000003", true),
+                ("0aaaaaaa-0000-7000-8000-000000000002", false),
+                ("22222222-aaaa-4bbb-8ccc-000000000002", false),
+                ("11111111-aaaa-4bbb-8ccc-000000000001", true),
+            ]
+        );
+        assert!(result.sessions.iter().all(|s| !s.archived));
+        assert_eq!(result.scan.file_count, FILE_COUNT);
+    }
+
+    #[test]
+    fn archived_codex_sessions_are_scanned_on_request() {
+        let data = Data::new("scan-archived");
+        let archive = data.dir.path().join("data/codex/archived_sessions");
+        fs::create_dir_all(&archive).unwrap();
+        let archived_id = "0aaaaaaa-0000-7000-8000-0000000000a1";
+        let meta = r#"{"timestamp":"2026-09-01T00:00:00.000Z","type":"session_meta","payload":{"id":"0aaaaaaa-0000-7000-8000-0000000000a1","cwd":"D:\\work\\demo","source":"cli"}}"#;
+        let prompt = r#"{"timestamp":"2026-09-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Old work"}]}}"#;
+        fs::write(
+            archive.join(format!("rollout-2026-09-01T00-00-00-{archived_id}.jsonl")),
+            format!(
+                "{meta}
+{prompt}
+"
+            ),
+        )
+        .unwrap();
+
+        let default = scan(&data.cached_options());
+        assert!(default.sessions.iter().all(|s| s.id != archived_id));
+        assert_eq!(default.scan.file_count, FILE_COUNT);
+
+        let with_archive = ScanOptions {
+            include_codex_archived: true,
+            ..data.cached_options()
+        };
+        let result = scan(&with_archive);
+        assert_eq!(result.scan.file_count, FILE_COUNT + 1);
+        let archived = result
+            .sessions
+            .iter()
+            .find(|s| s.id == archived_id)
+            .unwrap();
+        assert!(archived.archived);
+        assert!(archived.interactive);
+        assert_eq!(archived.title, "Old work");
+        assert!(result
+            .sessions
+            .iter()
+            .filter(|s| s.id != archived_id)
+            .all(|s| !s.archived));
+        let cached = scan(&with_archive);
+        assert_eq!(cached.scan.cache_hits, FILE_COUNT + 1);
+        assert_eq!(cached.sessions, result.sessions);
     }
 
     #[test]
@@ -569,6 +786,8 @@ mod tests {
             cache_path: None,
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             retry_git_misses: false,
+            include_non_interactive: false,
+            include_codex_archived: false,
         };
         let result = scan(&missing);
         assert!(result.sessions.is_empty() && result.groups.is_empty());
@@ -596,18 +815,42 @@ mod tests {
         };
         assert_eq!(
             keys(&value),
-            ["caseInsensitivePaths", "groups", "scan", "sessions"]
+            [
+                "caseInsensitivePaths",
+                "groups",
+                "hostPlatform",
+                "scan",
+                "sessions"
+            ]
         );
+        let platform = value["hostPlatform"].as_str().unwrap();
+        assert!(
+            ["windows", "macos", "linux"].contains(&platform),
+            "{platform}"
+        );
+        let legacy = value
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.as_str() != "hostPlatform")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        let parsed: SessionHistoryResult = serde_json::from_value(legacy.into()).unwrap();
+        assert_eq!(parsed.host_platform, None);
+        assert_eq!(clamp_max_line_bytes(0), MIN_MAX_LINE_BYTES);
+        assert_eq!(clamp_max_line_bytes(u64::MAX), MAX_MAX_LINE_BYTES);
         assert_eq!(
             keys(&value["sessions"][0]),
             [
                 "agent",
+                "archived",
                 "cwd",
                 "cwdExists",
                 "firstPrompt",
                 "gitBranch",
                 "groupKey",
                 "id",
+                "interactive",
                 "lastReply",
                 "messageCount",
                 "model",
@@ -687,6 +930,8 @@ mod tests {
             cache_path: None,
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             retry_git_misses: true,
+            include_non_interactive: false,
+            include_codex_archived: false,
         });
         assert!(result.scan.git_available);
         let summary: Vec<(SessionGroupKind, u32)> = result
@@ -798,6 +1043,25 @@ mod tests {
             println!(
                 "sessions {agent:?}: {}",
                 result.sessions.iter().filter(|s| s.agent == agent).count()
+            );
+        }
+        let everything = ScanOptions {
+            include_non_interactive: true,
+            include_codex_archived: true,
+            ..opts.clone()
+        };
+        for label in ["all-cold", "all-warm"] {
+            let started = Instant::now();
+            let result = scan(&everything);
+            println!(
+                "{label}: wall={}ms files={} parsed={} hits={} sessions={} nonInteractive={} archived={}",
+                started.elapsed().as_millis(),
+                result.scan.file_count,
+                result.scan.parsed_count,
+                result.scan.cache_hits,
+                result.sessions.len(),
+                result.sessions.iter().filter(|s| !s.interactive).count(),
+                result.sessions.iter().filter(|s| s.archived).count()
             );
         }
     }

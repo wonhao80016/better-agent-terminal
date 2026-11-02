@@ -12,6 +12,7 @@ import { buildConnectionUrl } from '../utils/connection-url'
 import { checkUpdatesNow, getUpdateState, subscribeUpdate } from '../lib/auto-update'
 import { CLAUDE_BUILTIN_MODELS } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
+import { normalizeSessionHistoryMaxLineMiB, SESSION_HISTORY_MIN_MAX_LINE_MIB, SESSION_HISTORY_MAX_MAX_LINE_MIB } from '../utils/session-history-actions'
 import { LoginDialog } from './LoginDialog'
 
 interface SettingsPanelProps {
@@ -124,6 +125,7 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
   const [bindInterface, setBindInterface] = useState<BindInterface>(settings.remoteServerBindInterface || 'localhost')
   const [clientStatus, setClientStatus] = useState<RemoteClientStatus>({ connected: false, info: null })
 
+  const [historyMaxLineDraft, setHistoryMaxLineDraft] = useState<string | null>(null)
   const [cxStatus, setCxStatus] = useState<CxDetectionStatus | null>(null)
   const [cxDetecting, setCxDetecting] = useState(false)
   const [codexUnifiedInfo, setCodexUnifiedInfo] = useState<string | null>(null)
@@ -1295,6 +1297,51 @@ Reference: https://github.com/ind-igo/cx`
                       </div>
                     )
                   })()}
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <h3>{t('settings.sessionHistorySection')}</h3>
+                <div className="settings-group checkbox-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={settings.sessionHistoryIncludeNonInteractive === true}
+                      onChange={e => settingsStore.setSessionHistoryIncludeNonInteractive(e.target.checked)}
+                    />
+                    {t('settings.sessionHistoryIncludeNonInteractive')}
+                  </label>
+                  <p className="settings-hint">{t('settings.sessionHistoryIncludeNonInteractiveHint')}</p>
+                </div>
+                <div className="settings-group checkbox-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={settings.sessionHistoryIncludeCodexArchived === true}
+                      onChange={e => settingsStore.setSessionHistoryIncludeCodexArchived(e.target.checked)}
+                    />
+                    {t('settings.sessionHistoryIncludeCodexArchived')}
+                  </label>
+                  <p className="settings-hint">{t('settings.sessionHistoryIncludeCodexArchivedHint')}</p>
+                </div>
+                <div className="settings-group">
+                  <label>{t('settings.sessionHistoryMaxLineMiB')}</label>
+                  <input
+                    type="number"
+                    min={SESSION_HISTORY_MIN_MAX_LINE_MIB}
+                    max={SESSION_HISTORY_MAX_MAX_LINE_MIB}
+                    step={1}
+                    value={historyMaxLineDraft ?? String(normalizeSessionHistoryMaxLineMiB(settings.sessionHistoryMaxLineMiB))}
+                    onChange={e => {
+                      const raw = e.target.value
+                      setHistoryMaxLineDraft(raw)
+                      const parsed = Number(raw)
+                      if (raw.trim() !== '' && Number.isFinite(parsed)) settingsStore.setSessionHistoryMaxLineMiB(parsed)
+                    }}
+                    onBlur={() => setHistoryMaxLineDraft(null)}
+                    style={{ width: 120 }}
+                  />
+                  <p className="settings-hint">{t('settings.sessionHistoryMaxLineMiBHint')}</p>
                 </div>
               </div>
             </>

@@ -4,12 +4,19 @@ import * as assert from 'node:assert/strict'
 type TauriInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
 
 const invokedCommands: string[] = []
+const savedSettings: string[] = []
+let storedSettings: string | null = null
 ;(globalThis as { window?: unknown }).window = {
   __TAURI_INTERNALS__: {
-    invoke: (async <T>(cmd: string) => {
+    invoke: (async <T>(cmd: string, args?: Record<string, unknown>) => {
       invokedCommands.push(cmd)
       if (cmd === 'workspace_save') return true as T
       if (cmd === 'app_set_dock_badge') return undefined as T
+      if (cmd === 'settings_save') {
+        savedSettings.push(String(args?.data))
+        return undefined as T
+      }
+      if (cmd === 'settings_load') return storedSettings as T
       throw new Error(`unexpected invoke: ${cmd}`)
     }) satisfies TauriInvoke,
   },
@@ -38,6 +45,8 @@ function entry(overrides: Partial<Entry>): Entry {
     updatedAt: '2026-11-01T00:00:00Z',
     groupKey: 'repo:c:\\repo',
     skippedLines: 0,
+    interactive: true,
+    archived: false,
     ...overrides,
   }
 }
@@ -351,26 +360,309 @@ async function main() {
   await (workspaceStore as unknown as { _savePromise: Promise<void> })._savePromise
   assert.ok(invokedCommands.includes('workspace_save'), 'workspace changes must be persisted')
 
+  // List options — every list() carries the Settings → Agent → Session History values.
+  const MiB = 1024 * 1024
+  assert.deepEqual(actions.sessionHistoryListOptions({}, false), {
+    refresh: false, includeNonInteractive: false, includeCodexArchived: false, maxLineBytes: 10 * MiB,
+  })
+  assert.deepEqual(actions.sessionHistoryListOptions({
+    sessionHistoryIncludeNonInteractive: true,
+    sessionHistoryIncludeCodexArchived: true,
+    sessionHistoryMaxLineMiB: 3,
+  }, true), {
+    refresh: true, includeNonInteractive: true, includeCodexArchived: true, maxLineBytes: 3 * MiB,
+  })
+  assert.equal(actions.sessionHistoryListOptions({ sessionHistoryMaxLineMiB: 0 }, false).maxLineBytes, MiB, 'minimum is 1 MiB')
+  for (const [input, expected] of [
+    [undefined, 10], [Number.NaN, 10], [Number.POSITIVE_INFINITY, 10], ['5', 10], [null, 10],
+    [0, 1], [-4, 1], [0.5, 1], [1, 1], [2.9, 2], [64, 64], [5000, 1024],
+  ] as const) {
+    assert.equal(actions.normalizeSessionHistoryMaxLineMiB(input), expected, String(input))
+  }
+
+  // Settings store — defaults stay implicit, values are normalized on set and on load.
+  const { settingsStore } = await import('../renderer/src/stores/settings-store.ts')
+  settingsStore.setSessionHistoryIncludeNonInteractive(true)
+  settingsStore.setSessionHistoryIncludeCodexArchived(true)
+  settingsStore.setSessionHistoryMaxLineMiB(0)
+  let saved = JSON.parse(savedSettings.at(-1) ?? '{}') as Record<string, unknown>
+  assert.equal(saved.sessionHistoryIncludeNonInteractive, true)
+  assert.equal(saved.sessionHistoryIncludeCodexArchived, true)
+  assert.equal(saved.sessionHistoryMaxLineMiB, 1)
+  assert.deepEqual(actions.sessionHistoryListOptions(settingsStore.getSettings(), false), {
+    refresh: false, includeNonInteractive: true, includeCodexArchived: true, maxLineBytes: MiB,
+  })
+  settingsStore.setSessionHistoryIncludeNonInteractive(false)
+  settingsStore.setSessionHistoryIncludeCodexArchived(false)
+  settingsStore.setSessionHistoryMaxLineMiB(10)
+  saved = JSON.parse(savedSettings.at(-1) ?? '{}') as Record<string, unknown>
+  assert.equal('sessionHistoryIncludeNonInteractive' in saved, false, 'off is stored as absent')
+  assert.equal('sessionHistoryIncludeCodexArchived' in saved, false)
+  assert.equal('sessionHistoryMaxLineMiB' in saved, false, 'the default is stored as absent')
+  storedSettings = JSON.stringify({ sessionHistoryIncludeNonInteractive: 'yes', sessionHistoryMaxLineMiB: -3 })
+  await settingsStore.load()
+  assert.equal(settingsStore.getSettings().sessionHistoryIncludeNonInteractive, undefined)
+  assert.equal(settingsStore.getSettings().sessionHistoryMaxLineMiB, 1)
+  storedSettings = JSON.stringify({ sessionHistoryIncludeCodexArchived: true, sessionHistoryMaxLineMiB: 'big' })
+  await settingsStore.load()
+  assert.equal(settingsStore.getSettings().sessionHistoryIncludeCodexArchived, true)
+  assert.equal(settingsStore.getSettings().sessionHistoryMaxLineMiB, undefined)
+
+  // Polling — skips busy or hidden ticks, never polls after stop.
+  type Tick = { handler: () => void; ms: number; cleared: boolean }
+  const ticks: Tick[] = []
+  const fakeTimers = {
+    setInterval: (handler: () => void, ms: number) => {
+      const tick = { handler, ms, cleared: false }
+      ticks.push(tick)
+      return tick
+    },
+    clearInterval: (handle: unknown) => { (handle as Tick).cleared = true },
+  }
+  let polls = 0
+  let busy = false
+  let hidden = false
+  const stopPolling = actions.startSessionHistoryPolling({
+    poll: () => { polls++ },
+    isBusy: () => busy,
+    isHidden: () => hidden,
+    timers: fakeTimers,
+  })
+  assert.equal(ticks.length, 1)
+  assert.equal(ticks[0].ms, 10_000, 'polls every 10 s')
+  assert.equal(polls, 0, 'no poll before the first tick')
+  ticks[0].handler()
+  assert.equal(polls, 1)
+  busy = true
+  ticks[0].handler()
+  assert.equal(polls, 1, 'a request in flight skips the tick')
+  busy = false
+  hidden = true
+  ticks[0].handler()
+  assert.equal(polls, 1, 'a hidden document skips the tick')
+  hidden = false
+  ticks[0].handler()
+  assert.equal(polls, 2)
+  stopPolling()
+  assert.equal(ticks[0].cleared, true, 'closing the modal clears the interval')
+  ticks[0].handler()
+  assert.equal(polls, 2, 'a tick that fires after stop is ignored')
+  stopPolling()
+  assert.equal(ticks.length, 1)
+
+  // Move all to Recycle Bin — only the sessions visible after search/filter, minus sessions open in a terminal.
+  const gone = group({ key: 'dir:d:\\gone', kind: 'missing', name: 'gone', rootPath: 'D:\\Gone', normalizedRootPath: 'd:\\gone' })
+  const goneResult: Result = {
+    ...result,
+    sessions: [
+      entry({ id: 'g-alpha-1', title: 'alpha one', groupKey: gone.key, cwd: 'D:\\Gone', cwdExists: false }),
+      entry({ id: 'g-alpha-2', title: 'alpha two', groupKey: gone.key, cwd: 'D:\\Gone', cwdExists: false }),
+      entry({ id: 'g-alpha-3', agent: 'codex', title: 'alpha three', groupKey: gone.key, cwd: 'D:\\Gone', cwdExists: false }),
+      entry({ id: 'g-beta', title: 'beta', groupKey: gone.key, cwd: 'D:\\Gone', cwdExists: false }),
+    ],
+    groups: [gone],
+  }
+  const goneView = actions.buildSessionHistoryView(goneResult, { ...filters, query: 'alpha', agent: 'claude' }, [])
+  assert.equal(goneView.length, 1)
+  seed({
+    workspaces: [{ id: 'ws-a', name: 'A', folderPath: 'D:\\A', createdAt: 1 }],
+    activeWorkspaceId: 'ws-a',
+    activeTerminalId: null,
+    terminals: [],
+  })
+  const openTerminal = workspaceStore.addTerminal('ws-a', 'claude-code', { cwd: 'D:\\A' })
+  workspaceStore.setTerminalSdkSessionId(openTerminal.id, 'g-alpha-2')
+  const codexSameId = workspaceStore.addTerminal('ws-a', 'codex-agent', { cwd: 'D:\\A' })
+  workspaceStore.setTerminalSdkSessionId(codexSameId.id, 'g-alpha-1')
+  assert.equal(actions.isSessionOpenInTerminal(workspaceStore, entry({ id: 'g-alpha-2' })), true)
+  assert.equal(
+    actions.isSessionOpenInTerminal(workspaceStore, entry({ id: 'g-alpha-1' })),
+    false,
+    'a codex terminal does not own a claude session with the same id',
+  )
+  assert.deepEqual(actions.selectTrashableSessions(goneView[0].sessions, workspaceStore), {
+    sessions: [{ agent: 'claude', id: 'g-alpha-1' }],
+    skippedOpen: 1,
+  })
+  assert.deepEqual(
+    actions.selectTrashableSessions(actions.buildSessionHistoryView(goneResult, filters, [])[0].sessions, workspaceStore)
+      .sessions.map(ref => ref.id).sort(),
+    ['g-alpha-1', 'g-alpha-3', 'g-beta'],
+  )
+  assert.deepEqual(actions.selectTrashableSessions([], workspaceStore), { sessions: [], skippedOpen: 0 })
+  assert.equal(actions.sessionRefKey({ agent: 'codex', id: 'x' }), 'codex:x')
+
+  // Trash preview and result — only unblocked sessions are confirmed; the summary drives the banner tone.
+  assert.deepEqual(actions.trashableRefsFromPreview({
+    items: [
+      { agent: 'claude', id: 'a', fileCount: 2, totalBytes: 10, newestModifiedAt: null, blockedReason: null },
+      { agent: 'codex', id: 'b', fileCount: 1, totalBytes: 5, newestModifiedAt: null, blockedReason: 'recently-updated' },
+      { agent: 'codex', id: 'c', fileCount: 3, totalBytes: 7, newestModifiedAt: '2026-11-02T00:00:00Z', blockedReason: null },
+    ],
+    fileCount: 5,
+    totalBytes: 17,
+    blockedCount: 1,
+  }), [{ agent: 'claude', id: 'a' }, { agent: 'codex', id: 'c' }])
+  assert.deepEqual(
+    actions.summarizeTrashResult({ trashed: [{ agent: 'claude', id: 'a' }], blocked: [], failed: [] }),
+    { trashed: 1, blocked: 0, failed: 0, tone: 'ok' },
+  )
+  assert.deepEqual(
+    actions.summarizeTrashResult({
+      trashed: [{ agent: 'claude', id: 'a' }],
+      blocked: [{ agent: 'codex', id: 'b', reason: 'recently-updated' }],
+      failed: [],
+    }),
+    { trashed: 1, blocked: 1, failed: 0, tone: 'warn' },
+  )
+  assert.deepEqual(
+    actions.summarizeTrashResult({
+      trashed: [{ agent: 'claude', id: 'a' }],
+      blocked: [],
+      failed: [{ agent: 'codex', id: 'c', error: 'access denied' }],
+    }),
+    { trashed: 1, blocked: 0, failed: 1, tone: 'warn' },
+  )
+  assert.deepEqual(
+    actions.summarizeTrashResult({ trashed: [], blocked: [], failed: [{ agent: 'codex', id: 'c', error: 'x' }] }),
+    { trashed: 0, blocked: 0, failed: 1, tone: 'error' },
+  )
+  assert.deepEqual(
+    actions.summarizeTrashResult({ trashed: [], blocked: [{ agent: 'claude', id: 'a', reason: 'not-found' }], failed: [] }),
+    { trashed: 0, blocked: 1, failed: 0, tone: 'warn' },
+  )
+
+  // Batches — at most the host's per-request limit, previewed and moved one batch at a time.
+  {
+    const { readFile } = await import('node:fs/promises')
+    const hostTrash = await readFile('src-tauri/crates/bat-session-index/src/trash.rs', 'utf8')
+    const hostLimit = /pub const MAX_TRASH_SESSIONS_PER_REQUEST: usize = (\d+);/.exec(hostTrash)?.[1]
+    assert.equal(Number(hostLimit), actions.SESSION_TRASH_MAX_PER_REQUEST, 'renderer batch size matches the host limit')
+    const refs = Array.from({ length: 450 }, (_, index) => ({ agent: 'claude' as const, id: `s${index}` }))
+    assert.deepEqual(actions.chunkSessionRefs(refs).map(batch => batch.length), [200, 200, 50])
+    assert.deepEqual(actions.chunkSessionRefs([...refs.slice(0, 3), refs[1]], 2), [refs.slice(0, 2), [refs[2]]])
+    assert.deepEqual(actions.chunkSessionRefs([]), [])
+
+    const previewCalls: number[] = []
+    const preview = await actions.previewTrashInBatches(refs, async batch => {
+      previewCalls.push(batch.length)
+      return {
+        items: batch.map((ref, index) => ({
+          ...ref,
+          fileCount: 1,
+          totalBytes: 10,
+          newestModifiedAt: null,
+          blockedReason: index === 0 ? 'recently-updated' as const : null,
+        })),
+        fileCount: batch.length - 1,
+        totalBytes: 10 * (batch.length - 1),
+        blockedCount: 1,
+      }
+    })
+    assert.deepEqual(previewCalls, [200, 200, 50])
+    assert.equal(preview.items.length, 450)
+    assert.equal(preview.blockedCount, 3)
+    assert.equal(preview.fileCount, 447)
+    assert.equal(preview.totalBytes, 4470)
+    assert.equal(actions.trashableRefsFromPreview(preview).length, 447)
+    await assert.rejects(
+      actions.previewTrashInBatches(refs, async batch => {
+        if (batch[0].id === 's200') throw new Error('timed out')
+        return { items: [], fileCount: 0, totalBytes: 0, blockedCount: 0 }
+      }),
+      /timed out/,
+    )
+
+    const trashCalls: string[] = []
+    const merged = await actions.trashInBatches(refs, async batch => {
+      trashCalls.push(batch[0].id)
+      return {
+        trashed: batch.slice(2),
+        blocked: [{ ...batch[0], reason: 'recently-updated' as const }],
+        failed: [{ ...batch[1], error: 'locked' }],
+      }
+    }, 'not attempted')
+    assert.deepEqual(trashCalls, ['s0', 's200', 's400'])
+    assert.equal(merged.batches, 3)
+    assert.equal(merged.rejected, false)
+    assert.deepEqual(actions.summarizeTrashResult(merged.result), { trashed: 444, blocked: 3, failed: 3, tone: 'warn' })
+
+    const stopped = await actions.trashInBatches(refs, async batch => {
+      if (batch[0].id === 's200') throw new Error('host unreachable')
+      return { trashed: batch, blocked: [], failed: [] }
+    }, 'not attempted')
+    assert.equal(stopped.batches, 2)
+    assert.equal(stopped.rejected, true)
+    assert.equal(stopped.result.trashed.length, 200)
+    assert.equal(stopped.result.failed.length, 250)
+    assert.deepEqual(stopped.result.failed[0], { agent: 'claude', id: 's200', error: 'host unreachable' })
+    assert.deepEqual(stopped.result.failed[199], { agent: 'claude', id: 's399', error: 'host unreachable' })
+    assert.deepEqual(stopped.result.failed[200], { agent: 'claude', id: 's400', error: 'not attempted' })
+    assert.equal(actions.summarizeTrashResult(stopped.result).tone, 'warn')
+  }
+
+  // Wording follows the host OS; hosts without hostPlatform keep the Recycle Bin wording.
+  assert.equal(actions.trashBinKind('windows'), 'recycle-bin')
+  assert.equal(actions.trashBinKind(null), 'recycle-bin')
+  assert.equal(actions.trashBinKind(undefined), 'recycle-bin')
+  assert.equal(actions.trashBinKind('macos'), 'trash')
+  assert.equal(actions.trashBinKind('linux'), 'trash')
+  assert.equal(actions.trashTextKey('moveToTrash', 'recycle-bin'), 'sessionHistory.moveToTrash')
+  assert.equal(actions.trashTextKey('moveToTrash', 'trash'), 'sessionHistory.osTrash.moveToTrash')
+
+  // Dismissal — a pending preview or running move keeps the modal open.
+  assert.equal(actions.modalDismissAction({ trashBusy: false, dialog: null }), 'close-modal')
+  assert.equal(actions.modalDismissAction({ trashBusy: true, dialog: null }), 'ignore')
+  assert.equal(actions.modalDismissAction({ trashBusy: false, dialog: { confirming: false } }), 'close-dialog')
+  assert.equal(actions.modalDismissAction({ trashBusy: true, dialog: { confirming: true } }), 'ignore')
+
+  // Sizes — binary units, one decimal below 100.
+  for (const [bytes, text] of [
+    [0, '0 B'], [-1, '0 B'], [Number.NaN, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1.0 KB'],
+    [1536, '1.5 KB'], [100 * 1024, '100 KB'], [10 * MiB, '10.0 MB'], [1.25 * 1024 * MiB, '1.3 GB'],
+    [5 * 1024 * 1024 * MiB, '5.0 TB'], [2048 * 1024 * 1024 * MiB, '2048 TB'],
+  ] as const) {
+    assert.equal(actions.formatByteSize(bytes), text, String(bytes))
+  }
+
   // Locales — every modal string exists in all four locale files with identical keys.
   const { readFile } = await import('node:fs/promises')
   const modalSource = await readFile('renderer/src/components/SessionHistoryModal.tsx', 'utf8')
   const usedKeys = new Set([...modalSource.matchAll(/t\('sessionHistory\.([A-Za-z]+)'/g)].map(match => match[1]))
   assert.ok(usedKeys.size > 20, 'modal should use sessionHistory.* strings')
+  const binKeys = new Set([...modalSource.matchAll(/tBin\('([A-Za-z]+)'/g)].map(match => match[1]))
+  assert.equal(binKeys.size, 10, 'Recycle Bin / Trash strings')
+  assert.ok(!modalSource.includes('onClick={onClose}'), 'every close control goes through the dismissal guard')
+  let referenceTrashKeys: string[] | null = null
+  const settingsSource = await readFile('renderer/src/components/SettingsPanel.tsx', 'utf8')
+  const settingsKeys = new Set([...settingsSource.matchAll(/t\('settings\.(sessionHistory[A-Za-z]*)'/g)].map(match => match[1]))
+  assert.equal(settingsKeys.size, 7, 'Settings → Agent → Session History strings')
   let referenceKeys: string[] | null = null
   for (const locale of ['en', 'zh-TW', 'zh-CN', 'ja']) {
     const translations = JSON.parse(await readFile(`renderer/src/locales/${locale}.json`, 'utf8')) as {
       sidebar: Record<string, string>
+      settings: Record<string, string>
       sessionHistory: Record<string, string>
     }
     assert.ok(translations.sidebar.history, `${locale} sidebar.history`)
+    for (const key of settingsKeys) assert.ok(translations.settings[key], `${locale} is missing settings.${key}`)
     const keys = Object.keys(translations.sessionHistory).sort()
     if (referenceKeys) assert.deepEqual(keys, referenceKeys, `${locale} sessionHistory keys must match en`)
     else referenceKeys = keys
+    const hasKey = (table: Record<string, unknown>, key: string) => key in table
+      || (`${key}_one` in table && `${key}_other` in table)
     for (const key of usedKeys) {
-      const present = key in translations.sessionHistory
-        || (`${key}_one` in translations.sessionHistory && `${key}_other` in translations.sessionHistory)
-      assert.ok(present, `${locale} is missing sessionHistory.${key}`)
+      assert.ok(hasKey(translations.sessionHistory, key), `${locale} is missing sessionHistory.${key}`)
     }
+    const osTrash = translations.sessionHistory.osTrash as unknown as Record<string, string>
+    assert.equal(typeof osTrash, 'object', `${locale} sessionHistory.osTrash`)
+    for (const key of binKeys) {
+      assert.ok(hasKey(translations.sessionHistory, key), `${locale} is missing sessionHistory.${key}`)
+      assert.ok(hasKey(osTrash, key), `${locale} is missing sessionHistory.osTrash.${key}`)
+    }
+    const trashKeys = Object.keys(osTrash).sort()
+    if (referenceTrashKeys) assert.deepEqual(trashKeys, referenceTrashKeys, `${locale} osTrash keys must match en`)
+    else referenceTrashKeys = trashKeys
   }
   console.log('session history actions: passed')
 }
