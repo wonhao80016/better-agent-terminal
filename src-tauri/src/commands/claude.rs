@@ -1600,19 +1600,32 @@ fn list_codex_sessions_in_root(root: &Path, cwd: &str) -> Vec<SessionListEntry> 
     results
 }
 
-pub(crate) fn list_sessions_native(cwd: &str, agent_kind: Option<&str>) -> Vec<SessionListEntry> {
+pub(crate) fn list_sessions_for_host(
+    ctx: &HostContext,
+    cwd: &str,
+    agent_kind: Option<&str>,
+) -> Vec<SessionListEntry> {
+    let codex_home = if agent_kind == Some("codex") {
+        active_codex_home(ctx)
+    } else {
+        None
+    };
+    list_sessions_native(cwd, agent_kind, codex_home.as_deref())
+}
+
+fn list_sessions_native(
+    cwd: &str,
+    agent_kind: Option<&str>,
+    codex_home: Option<&Path>,
+) -> Vec<SessionListEntry> {
+    if agent_kind == Some("codex") {
+        return codex_home
+            .map(|codex_home| list_codex_sessions_in_root(&codex_home.join("sessions"), cwd))
+            .unwrap_or_default();
+    }
     let Some(home) = home_dir() else {
         return Vec::new();
     };
-    if agent_kind == Some("codex") {
-        if cwd.is_empty() {
-            return Vec::new();
-        }
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
-        return list_codex_sessions_in_root(&codex_home.join("sessions"), cwd);
-    }
     list_claude_sessions_in_projects(cwd, &home.join(".claude").join("projects"))
 }
 
@@ -4436,16 +4449,9 @@ pub async fn claude_list_sessions(
     {
         return result;
     }
-    if agent_kind.as_deref() == Some("codex") {
-        let sessions = active_codex_home(&HostContext::from_app(app.clone()))
-            .map(|codex_home| list_codex_sessions_in_root(&codex_home.join("sessions"), &cwd))
-            .unwrap_or_default();
-        return Ok(serde_json::to_value(sessions).unwrap_or_else(|_| json!([])));
-    }
-    Ok(
-        serde_json::to_value(list_sessions_native(&cwd, agent_kind.as_deref()))
-            .unwrap_or_else(|_| json!([])),
-    )
+    let sessions =
+        list_sessions_for_host(&HostContext::from_app(app.clone()), &cwd, agent_kind.as_deref());
+    Ok(serde_json::to_value(sessions).unwrap_or_else(|_| json!([])))
 }
 
 #[cfg(feature = "desktop")]
@@ -6298,6 +6304,29 @@ mod tests {
         assert!(missing.is_empty());
 
         fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn list_sessions_native_reads_codex_from_the_given_home_only() {
+        let active_home = temp_data_dir("codex-session-active-home");
+        let sessions_dir = active_home.join("sessions").join("2026").join("05").join("11");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"thread-active","cwd":"/repo/app"}}
+{"type":"event_msg","payload":{"input":"from active home"}}
+"#,
+        )
+        .unwrap();
+
+        let sessions = list_sessions_native("/repo/app", Some("codex"), Some(&active_home));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].sdk_session_id, "thread-active");
+
+        assert!(list_sessions_native("/repo/app", Some("codex"), None).is_empty());
+        assert!(list_sessions_native("/repo/other", Some("codex"), Some(&active_home)).is_empty());
+
+        fs::remove_dir_all(active_home).ok();
     }
 
     #[test]

@@ -3174,7 +3174,8 @@ fn invoke_rust_for_remote(
         }
         "claude:list-sessions" => string_param(params, "cwd", channel).and_then(|cwd| {
             let agent_kind = optional_string_param(params, "agentKind");
-            serde_json::to_value(claude_cmd::list_sessions_native(
+            serde_json::to_value(claude_cmd::list_sessions_for_host(
+                ctx,
                 &cwd,
                 agent_kind.as_deref(),
             ))
