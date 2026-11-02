@@ -373,6 +373,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         // host-wide rather than per session — the page slices by model and effort
         // across every session the host has run.
         "agent:latency-samples" => Some(&["fromMs", "toMs"]),
+        "session-history:list" => Some(&["refresh"]),
         "claude:auth-login-submit-code" => Some(&["code", "loginId"]),
         "claude:auth-login-cancel" => Some(&["loginId"]),
         "claude:prepare-cli-session" => Some(&[
@@ -1177,6 +1178,22 @@ mod tests {
         // channel exists only as a pull; nothing proxies it as an event.
         assert!(!is_proxied_remote_event("agent:latency-samples"));
         assert!(!is_proxied_remote_event("agent:latency-sample"));
+    }
+
+    #[test]
+    fn session_history_list_maps_positional_refresh_onto_named_param() {
+        let channel = "session-history:list";
+        assert_eq!(canonical_remote_channel(channel), channel);
+        assert_eq!(
+            legacy_v1_args_to_params(channel, &[json!(true)]),
+            json!({ "refresh": true })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params(channel, &[json!({ "refresh": false })]),
+            json!({ "refresh": false })
+        );
+        assert_eq!(legacy_v1_args_to_params(channel, &[]), Value::Null);
+        assert!(!is_proxied_remote_event(channel));
     }
 
     #[test]

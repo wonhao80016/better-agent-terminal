@@ -7,9 +7,9 @@ use crate::commands::update as update_cmd;
 use crate::commands::{
     agent as agent_cmd, app as app_cmd, claude as claude_cmd, fs as fs_cmd, git as git_cmd,
     github as github_cmd, image as image_cmd, notification as notification_cmd,
-    profile as profile_cmd, pty as pty_cmd, runtime as runtime_cmd, settings as settings_cmd,
-    snippet as snippet_cmd, worker_buffer as worker_cmd, worker_buffer::WorkerBufferState,
-    worktree as worktree_cmd,
+    profile as profile_cmd, pty as pty_cmd, runtime as runtime_cmd,
+    session_history as session_history_cmd, settings as settings_cmd, snippet as snippet_cmd,
+    worker_buffer as worker_cmd, worker_buffer::WorkerBufferState, worktree as worktree_cmd,
 };
 use crate::electron_safe_storage::{
     read_secret_json, read_secret_string, write_secret_json, write_secret_string, SecretJsonRead,
@@ -3180,6 +3180,7 @@ fn invoke_rust_for_remote(
             ))
             .map_err(|err| format!("{channel} serialization failed: {err}"))
         }),
+        "session-history:list" => session_history_cmd::list_for_remote(ctx, params),
         "claude:archive-messages" => {
             string_param(params, "sessionId", channel).and_then(|session_id| {
                 let messages = params.get("messages").cloned().unwrap_or(Value::Null);
@@ -4003,6 +4004,7 @@ fn remote_invoke_timeout(channel: &str) -> Duration {
         | "claude:fork-session"
         | "runtime:install"
         | "runtime:clear-managed" => SESSION_INVOKE_TIMEOUT,
+        "session-history:list" => session_history_cmd::REMOTE_TIMEOUT,
         _ => INVOKE_TIMEOUT,
     }
 }
@@ -4070,6 +4072,58 @@ mod tests {
             protocol: "bat-remote/v2".to_string(),
             compression: "none".to_string(),
         }
+    }
+
+    #[test]
+    fn session_history_list_arm_returns_scan_result_and_honours_refresh_param() {
+        let channel = "session-history:list";
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates")
+            .join("bat-session-index")
+            .join("fixtures");
+        let data_dir = std::env::temp_dir().join(format!(
+            "bat-session-history-remote-test-{:032x}",
+            rand::random::<u128>()
+        ));
+        let sources = session_history_cmd::ScanSources {
+            claude_home: Some(fixtures.join("claude")),
+            codex_home: Some(fixtures.join("codex")),
+            data_dir: Some(data_dir.clone()),
+        };
+
+        let first =
+            session_history_cmd::list_value(&sources, &legacy_v1_args_to_params(channel, &[]))
+                .unwrap();
+        let sessions = first["sessions"].as_array().expect("sessions array");
+        assert!(!sessions.is_empty());
+        for session in sessions {
+            assert!(matches!(session["agent"].as_str(), Some("claude" | "codex")));
+            assert!(session["id"].is_string());
+            assert!(session["groupKey"].is_string());
+            assert!(session["cwdExists"].is_boolean());
+        }
+        assert!(first["groups"].is_array());
+        assert!(first["scan"]["fileCount"].as_u64().unwrap() > 0);
+        assert!(first["scan"]["scannedAt"].is_string());
+        assert!(first["caseInsensitivePaths"].is_boolean());
+        assert!(data_dir
+            .join("session-history")
+            .join("index-v1.json")
+            .is_file());
+
+        let refreshed = session_history_cmd::list_value(
+            &sources,
+            &legacy_v1_args_to_params(channel, &[json!(true)]),
+        )
+        .unwrap();
+        assert!(refreshed["scan"]["cacheHits"].as_u64().unwrap() > 0);
+        assert_eq!(refreshed["sessions"], first["sessions"]);
+
+        assert_eq!(
+            remote_invoke_timeout(channel),
+            session_history_cmd::REMOTE_TIMEOUT
+        );
+        let _ = fs::remove_dir_all(&data_dir);
     }
 
     #[test]

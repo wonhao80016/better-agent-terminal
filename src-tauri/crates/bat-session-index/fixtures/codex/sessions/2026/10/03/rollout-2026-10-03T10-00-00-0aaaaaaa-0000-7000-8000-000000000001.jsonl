@@ -1,0 +1,13 @@
+{"timestamp":"2026-10-03T10:00:00.000Z","type":"session_meta","payload":{"id":"0aaaaaaa-0000-7000-8000-000000000001","timestamp":"2026-10-03T10:00:00.000Z","cwd":"D:\\work\\demo","originator":"codex_vscode","cli_version":"0.162.1","source":"vscode","git":{"commit_hash":"0000000000000000000000000000000000000000","branch":"feat/config-loader"}}}
+{"timestamp":"2026-10-03T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox</permissions instructions>"}]}}
+{"timestamp":"2026-10-03T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for D:\\work\\demo\n\nrules"}]}}
+{"timestamp":"2026-10-03T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>D:\\work\\demo</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-10-03T10:00:02.000Z","type":"turn_context","payload":{"cwd":"D:\\work\\demo","model":"gpt-5.5","effort":"medium"}}
+{"timestamp":"2026-10-03T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# Context from my IDE setup:\n\n## Active file: src/a.ts\n\n## My request for Codex:\nRename the config loader"}]}}
+{"timestamp":"2026-10-03T10:00:20.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Renamed loadConfig to readConfig."}]}}
+{"timestamp":"2026-10-03T10:00:21.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+{"timestamp":"2026-10-03T10:05:00.000Z","type":"turn_context","payload":{"cwd":"D:\\work\\demo","model":"gpt-5.6-sol","effort":"high"}}
+{"timestamp":"2026-10-03T10:05:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Also update the docs"}]}}
+{"timestamp":"2026-10-03T10:05:30.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Docs   updated\nin README."}]}}
+{"timestamp":"2026-10-03T15:00:00.000Z","type":"compacted","payload":{"message":"summary","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"replayed prompt"}]}]}}
+{"timestamp":"2026-10-03T15:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"trunc

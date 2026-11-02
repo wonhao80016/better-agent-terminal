@@ -78,6 +78,7 @@ interface SidebarProps {
   onReorderWorkspaces: (workspaceIds: string[]) => void
   onOpenEnvVars: (workspaceId: string) => void
   onDetachWorkspace: (workspaceId: string) => void
+  onOpenHistory: () => void
   onOpenProfiles: () => void
   onOpenSettings: () => void
 }
@@ -100,6 +101,7 @@ export function Sidebar({
   onReorderWorkspaces,
   onOpenEnvVars,
   onDetachWorkspace,
+  onOpenHistory,
   onOpenProfiles,
   onOpenSettings,
 }: Readonly<SidebarProps>) {
@@ -818,6 +820,9 @@ export function Sidebar({
           {t('sidebar.addWorkspace')}
         </button>
         <div className="sidebar-footer-buttons">
+          <button className="settings-btn" onClick={onOpenHistory}>
+            {t('sidebar.history')}
+          </button>
           <button className="settings-btn" onClick={onOpenProfiles}>
             {t('sidebar.profiles')}
           </button>

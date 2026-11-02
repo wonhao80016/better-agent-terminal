@@ -11,6 +11,7 @@
 // so older shells keep working. We never fall back silently.
 
 import { dispatchTauriNativeDrop } from './utils/tauri-native-drop'
+import type { SessionHistoryListOptions, SessionHistoryResult } from './types/session-history'
 
 type BatAppAPI = any
 
@@ -1581,6 +1582,10 @@ function createTauriHost(): BatAppAPI {
     tunnel: {
       getConnection: () => getInvoke()<unknown>('tunnel_get_connection'),
     },
+    sessionHistory: {
+      list: (options?: SessionHistoryListOptions) =>
+        getInvoke()<SessionHistoryResult>('session_history_list', { options }),
+    },
     pty: {
       create: (options: unknown) =>
         getInvoke()<string>('pty_create', { options: options as Record<string, unknown> }),
@@ -1692,7 +1697,7 @@ const PORTED_NAMESPACES = new Set([
   'pty', 'workspace', 'update', 'debug', 'git', 'app',
   'notification', 'system', 'github', 'snippet', 'profile',
   'claude', 'claudeChannel', 'claudeCli', 'remoteFs', 'worktree', 'agent', 'workerBuffer',
-  'remote', 'tunnel', 'remoteTunnel',
+  'remote', 'tunnel', 'remoteTunnel', 'sessionHistory',
 ])
 
 export function installTauriShim(): void {

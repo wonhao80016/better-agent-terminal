@@ -1,0 +1,2 @@
+{"timestamp":"2026-10-04T11:30:00.000Z","type":"session_meta","payload":{"id":"0aaaaaaa-0000-7000-8000-000000000003","timestamp":"2026-10-04T11:30:00.000Z","cwd":"D:\\work\\demo","originator":"codex_vscode","source":{"subagent":{"thread_spawn":{"parent_thread_id":"0aaaaaaa-0000-7000-8000-000000000001","depth":1,"agent_path":"/root/worker","agent_nickname":"Ada","agent_role":null}}}}}
+{"timestamp":"2026-10-04T11:30:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Check the tests"}]}}

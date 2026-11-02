@@ -51,8 +51,8 @@ use commands::{
     claude_cli as claude_cli_cmd, clipboard as clipboard_cmd, debug as debug_cmd,
     dialog as dialog_cmd, fs as fs_cmd, fugu as fugu_cmd, git as git_cmd, github as github_cmd,
     image as image_cmd, notification as notification_cmd, profile as profile_cmd, pty as pty_cmd,
-    remote as remote_cmd, remote_tunnel as remote_tunnel_cmd, runtime as runtime_cmd, settings,
-    shell as shell_cmd,
+    remote as remote_cmd, remote_tunnel as remote_tunnel_cmd, runtime as runtime_cmd,
+    session_history as session_history_cmd, settings, shell as shell_cmd,
     snippet as snippet_cmd, tunnel as tunnel_cmd, update as update_cmd,
     worker_buffer as worker_buffer_cmd, workspace as workspace_cmd, worktree as worktree_cmd,
 };
@@ -415,6 +415,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             claude_cmd::claude_get_cli_path,
             claude_cmd::claude_prepare_cli_session,
             claude_cmd::claude_list_sessions,
+            session_history_cmd::session_history_list,
             claude_cmd::claude_get_supported_models,
             claude_cmd::claude_get_supported_efforts,
             claude_cmd::claude_get_supported_codex_sandbox_modes,

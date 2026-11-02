@@ -1,0 +1,467 @@
+.session-history-panel {
+  width: 880px;
+  max-width: 94vw;
+  height: 84vh;
+  max-height: 84vh;
+}
+
+.session-history-header {
+  gap: 10px;
+  justify-content: flex-start;
+  padding: 12px 16px;
+}
+
+.session-history-header h2 {
+  white-space: nowrap;
+}
+
+.session-history-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.session-history-chip.remote {
+  border-color: #3b82f6;
+  color: #93c5fd;
+}
+
+.session-history-scan {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-history-icon-btn {
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+
+.session-history-icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.session-history-icon-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.session-history-icon-btn.spinning {
+  animation: session-history-spin 1s linear infinite;
+}
+
+@keyframes session-history-spin {
+  to { transform: rotate(360deg); }
+}
+
+.session-history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.session-history-search {
+  flex: 1;
+  min-width: 200px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.session-history-search:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.session-history-segment {
+  display: flex;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.session-history-segment button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.session-history-segment button + button {
+  border-left: 1px solid var(--border-color);
+}
+
+.session-history-segment button.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.session-history-sort,
+.session-history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.session-history-sort select {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.session-history-banner {
+  margin: 8px 16px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.session-history-banner.warn {
+  border: 1px solid #7a5b10;
+  background: #2a2208;
+  color: #fbbf24;
+}
+
+.session-history-banner.error {
+  border: 1px solid #7f1d1d;
+  background: #2a1010;
+  color: #fca5a5;
+}
+
+.session-history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 10px 14px;
+}
+
+.session-history-state {
+  padding: 24px 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.session-history-state.error {
+  color: #fca5a5;
+}
+
+.session-history-state .session-history-btn {
+  margin-top: 10px;
+}
+
+.session-history-muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.session-history-skeleton {
+  height: 34px;
+  margin-top: 8px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--bg-tertiary), var(--bg-hover), var(--bg-tertiary));
+}
+
+.session-history-skeleton.short {
+  width: 70%;
+}
+
+.session-history-group {
+  margin-top: 8px;
+}
+
+.session-history-group.missing {
+  opacity: 0.6;
+}
+
+.session-history-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.session-history-group-head:hover {
+  background: var(--bg-tertiary);
+}
+
+.session-history-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.session-history-caret {
+  color: var(--text-secondary);
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.session-history-group-name {
+  color: var(--text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.session-history-group-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-history-count {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.session-history-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.session-history-badge.ok {
+  color: #4ade80;
+  border: 1px solid #166534;
+  background: #0f2a1a;
+}
+
+.session-history-badge.warn {
+  color: #fbbf24;
+  border: 1px solid #7a5b10;
+  background: #2a2208;
+}
+
+.session-history-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.session-history-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.session-history-btn.primary {
+  background: #0b3a5e;
+  border-color: var(--accent-color);
+  color: #fff;
+}
+
+.session-history-btn.primary:hover:not(:disabled) {
+  background: var(--accent-color);
+}
+
+.session-history-btn:disabled {
+  background: var(--bg-secondary);
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.session-history-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 22px;
+}
+
+.session-history-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.session-history-card.expanded {
+  border-color: var(--accent-color);
+}
+
+.session-history-card.missing {
+  opacity: 0.7;
+}
+
+.session-history-card-summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  outline: none;
+}
+
+.session-history-card-summary:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent-color);
+  border-radius: 6px;
+}
+
+.session-history-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-history-agent {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #fff;
+  text-transform: uppercase;
+}
+
+.session-history-agent.claude {
+  background: #d97757;
+}
+
+.session-history-agent.codex {
+  background: #10a37f;
+}
+
+.session-history-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.session-history-open-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #93c5fd;
+  border: 1px solid #1e40af;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.session-history-card-time {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-history-card-reply {
+  margin: 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.session-history-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.session-history-card-detail {
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.session-history-card-detail dl {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 4px 10px;
+  font-size: 11px;
+}
+
+.session-history-card-detail dt {
+  color: var(--text-secondary);
+}
+
+.session-history-card-detail dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+  user-select: text;
+}
+
+.session-history-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.session-history-card-hint {
+  margin-top: 6px;
+  color: #fbbf24;
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .session-history-header,
+  .session-history-group-head,
+  .session-history-card-top {
+    flex-wrap: wrap;
+  }
+
+  .session-history-group-path {
+    flex-basis: 100%;
+    white-space: normal;
+  }
+
+  .session-history-search {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+
+  .session-history-card-detail dl {
+    grid-template-columns: 1fr;
+  }
+}

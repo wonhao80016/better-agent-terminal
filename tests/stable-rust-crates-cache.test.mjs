@@ -27,6 +27,7 @@ const dependencies = {
   'bat-git': ['bat-host-support'],
   'bat-pty': ['bat-app-storage', 'bat-host-support'],
   'bat-runtime': ['bat-host-support'],
+  'bat-session-index': ['bat-host-support'],
 }
 const hostDependents = STABLE_CRATES.filter(name => name !== 'bat-remote-protocol')
 

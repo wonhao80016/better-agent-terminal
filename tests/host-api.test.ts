@@ -258,6 +258,17 @@ async function run() {
       if (cmd === 'remote_disconnect') return false as unknown as T
       if (cmd === 'remote_client_status') return { connected: false, info: null } as unknown as T
       if (cmd === 'remote_test_connection') return { ok: false, error: 'stub' } as unknown as T
+      if (cmd === 'session_history_list') {
+        return {
+          sessions: [],
+          groups: [],
+          scan: {
+            fileCount: 0, parsedCount: 0, cacheHits: 0, failedCount: 0, skippedLines: 0,
+            durationMs: 0, scannedAt: '2026-11-02T00:00:00Z', gitAvailable: true,
+          },
+          caseInsensitivePaths: true,
+        } as unknown as T
+      }
       if (cmd === 'remote_list_profiles') return { error: 'stub' } as unknown as T
       if (cmd === 'tunnel_get_connection') return { error: 'stub' } as unknown as T
       throw new Error(`unexpected invoke: ${cmd}`)
@@ -711,6 +722,12 @@ async function run() {
     assert.deepEqual(await mod.host.remote.listProfiles('h', 9876, 't', 'fp'), { error: 'stub' })
     assert.deepEqual(await mod.host.tunnel.getConnection(), { error: 'stub' })
 
+    // sessionHistory.list — host-owned scan; options pass through untouched.
+    const history = await mod.host.sessionHistory.list()
+    assert.deepEqual(history.sessions, [])
+    assert.equal(history.caseInsensitivePaths, true)
+    await mod.host.sessionHistory.list({ refresh: true })
+
     const calledCommands = new Set(invokeCalls.map(call => call.cmd))
     for (const cmd of [
       'fs_resolve_path_links',
@@ -960,6 +977,8 @@ async function run() {
       { cmd: 'remote_test_connection', args: { host: 'h', port: 9876, token: 't', fingerprint: 'fp' } },
       { cmd: 'remote_list_profiles', args: { host: 'h', port: 9876, token: 't', fingerprint: 'fp' } },
       { cmd: 'tunnel_get_connection', args: undefined },
+      { cmd: 'session_history_list', args: { options: undefined } },
+      { cmd: 'session_history_list', args: { options: { refresh: true } } },
     ])
   }
 

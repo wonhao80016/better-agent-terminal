@@ -454,6 +454,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bat-session-index"
+version = "0.1.0"
+dependencies = [
+ "bat-host-support",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "better-agent-terminal"
 version = "0.1.0"
 dependencies = [
@@ -467,6 +476,7 @@ dependencies = [
  "bat-pty",
  "bat-remote-protocol",
  "bat-runtime",
+ "bat-session-index",
  "flate2",
  "image",
  "keyring-core",

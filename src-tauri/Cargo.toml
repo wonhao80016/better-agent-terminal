@@ -57,6 +57,7 @@ bat-host-support = { path = "crates/bat-host-support" }
 bat-pty = { path = "crates/bat-pty" }
 bat-remote-protocol = { path = "crates/bat-remote-protocol" }
 bat-runtime = { path = "crates/bat-runtime" }
+bat-session-index = { path = "crates/bat-session-index" }
 tauri = { version = "2", features = [], optional = true }
 # Direct tokio dep backs the headless async runtime (crate::async_rt); on desktop
 # the shim re-exports tauri's bundled runtime, so this is only load-bearing headless.

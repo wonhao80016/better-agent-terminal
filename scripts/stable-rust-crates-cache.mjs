@@ -20,6 +20,7 @@ export const STABLE_CRATES = Object.freeze([
   'bat-pty',
   'bat-remote-protocol',
   'bat-runtime',
+  'bat-session-index',
 ])
 const SOURCE_TIME = new Date('2000-01-01T00:00:00Z')
 const METADATA_SECTION = 'package.metadata.bat-stable-crates-cache'

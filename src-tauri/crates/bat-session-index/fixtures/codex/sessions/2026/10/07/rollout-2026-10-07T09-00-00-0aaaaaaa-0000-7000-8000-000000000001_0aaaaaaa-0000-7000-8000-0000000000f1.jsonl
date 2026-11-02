@@ -1,0 +1,4 @@
+{"timestamp":"2026-10-07T09:00:00.000Z","type":"session_meta","payload":{"id":"0aaaaaaa-0000-7000-8000-000000000001","session_id":"0aaaaaaa-0000-7000-8000-000000000001","timestamp":"2026-10-03T10:00:00.000Z","cwd":"D:\\work\\demo","originator":"codex_vscode","source":"vscode","git":{"branch":"feat/later-page"},"history_mode":"paginated","history_base":{"thread_id":"0aaaaaaa-0000-7000-8000-000000000001","end_ordinal_exclusive":11,"end_byte_offset":2048}}}
+{"timestamp":"2026-10-07T09:00:01.000Z","type":"turn_context","payload":{"cwd":"D:\\work\\demo","model":"test-model-b","effort":"medium"}}
+{"timestamp":"2026-10-07T09:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a changelog entry"}]}}
+{"timestamp":"2026-10-07T09:01:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Changelog updated."}]}}

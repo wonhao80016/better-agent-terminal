@@ -37,6 +37,7 @@ pub mod pty;
 pub mod remote;
 pub mod remote_tunnel;
 pub mod runtime;
+pub mod session_history;
 pub mod settings;
 #[cfg(feature = "desktop")]
 pub mod shell;

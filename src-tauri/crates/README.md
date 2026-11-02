@@ -15,6 +15,7 @@ remote routing, and event publication through the existing host API.
 | `bat-agent-bridge` | Node process lifecycle, JSON-RPC requests and event callbacks |
 | `bat-filesystem` | File operations, search, transfers and bounded directory watchers |
 | `bat-pty` | PTY lifecycle, IO, viewport and worker scrollback/Procfile processes |
+| `bat-session-index` | Claude and Codex session discovery, parsing, caching and project grouping |
 
 Keep these crates independent of Tauri and application session/window state.
 The host owns each store, watcher, or bridge state and supplies paths or event
