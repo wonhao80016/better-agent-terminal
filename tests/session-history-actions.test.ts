@@ -126,7 +126,7 @@ async function main() {
     assert.equal(actions.sessionResumeCommand({ agent: 'codex', id: invalid }), null, JSON.stringify(invalid))
   }
 
-  // Escape — handled in the capture phase and stopped before window bubble listeners (agent panels) run.
+  // Escape — the trash dialog handles it in the capture phase, before window bubble listeners (agent panels) run.
   type Listener = (event: Event) => void
   const registered: Array<{ listener: Listener; capture: boolean }> = []
   const fakeWindow = {
@@ -156,18 +156,18 @@ async function main() {
   const panelKeys: string[] = []
   fakeWindow.addEventListener('keydown', event => { panelKeys.push((event as KeyboardEvent).key) })
   let closed = 0
-  const unbindEscape = actions.listenForModalEscape(fakeWindow, () => { closed++ })
-  assert.equal(registered.filter(r => r.capture).length, 1, 'modal listens in the capture phase')
+  const unbindEscape = actions.listenForDialogEscape(fakeWindow, () => { closed++ })
+  assert.equal(registered.filter(r => r.capture).length, 1, 'dialog listens in the capture phase')
   const escape = dispatchKey('Escape')
   assert.equal(closed, 1)
   assert.equal(escape.defaultPrevented, true)
-  assert.deepEqual(panelKeys, [], 'Escape must not reach the agent panel while the modal is open')
+  assert.deepEqual(panelKeys, [], 'Escape must not reach the agent panel while the dialog is open')
   dispatchKey('a')
   assert.deepEqual(panelKeys, ['a'], 'other keys still reach window listeners')
   unbindEscape()
   dispatchKey('Escape')
   assert.equal(closed, 1)
-  assert.deepEqual(panelKeys, ['a', 'Escape'], 'closed modal no longer intercepts Escape')
+  assert.deepEqual(panelKeys, ['a', 'Escape'], 'a closed dialog no longer intercepts Escape')
   assert.equal(actions.sessionAgentPreset('claude'), 'claude-code')
   assert.equal(actions.sessionAgentPreset('codex'), 'codex-agent')
   assert.equal(actions.canAddGroupAsWorkspace(group({ kind: 'missing' })), false)
@@ -444,7 +444,7 @@ async function main() {
   ticks[0].handler()
   assert.equal(polls, 2)
   stopPolling()
-  assert.equal(ticks[0].cleared, true, 'closing the modal clears the interval')
+  assert.equal(ticks[0].cleared, true, 'leaving the History tab clears the interval')
   ticks[0].handler()
   assert.equal(polls, 2, 'a tick that fires after stop is ignored')
   stopPolling()
@@ -610,11 +610,43 @@ async function main() {
   assert.equal(actions.trashTextKey('moveToTrash', 'recycle-bin'), 'sessionHistory.moveToTrash')
   assert.equal(actions.trashTextKey('moveToTrash', 'trash'), 'sessionHistory.osTrash.moveToTrash')
 
-  // Dismissal — a pending preview or running move keeps the modal open.
-  assert.equal(actions.modalDismissAction({ trashBusy: false, dialog: null }), 'close-modal')
-  assert.equal(actions.modalDismissAction({ trashBusy: true, dialog: null }), 'ignore')
-  assert.equal(actions.modalDismissAction({ trashBusy: false, dialog: { confirming: false } }), 'close-dialog')
-  assert.equal(actions.modalDismissAction({ trashBusy: true, dialog: { confirming: true } }), 'ignore')
+  // Dismissal — a running move keeps the dialog open.
+  assert.equal(actions.trashDialogDismissAction(null), 'ignore')
+  assert.equal(actions.trashDialogDismissAction({ confirming: false }), 'close-dialog')
+  assert.equal(actions.trashDialogDismissAction({ confirming: true }), 'ignore')
+
+  // Activation — the first view loads in the foreground; later views refresh quietly unless busy.
+  assert.equal(actions.sessionHistoryActivationLoad({ activatedBefore: false, busy: false }), 'initial')
+  assert.equal(actions.sessionHistoryActivationLoad({ activatedBefore: false, busy: true }), 'initial')
+  assert.equal(actions.sessionHistoryActivationLoad({ activatedBefore: true, busy: false }), 'background')
+  assert.equal(actions.sessionHistoryActivationLoad({ activatedBefore: true, busy: true }), 'skip')
+
+  // Sidebar tab — presentation-only, unknown or unreadable values fall back to Workspaces.
+  {
+    const tabs = await import('../renderer/src/utils/sidebar-tab.ts')
+    assert.deepEqual(tabs.SIDEBAR_TABS, ['workspaces', 'history'])
+    assert.equal(tabs.parseSidebarTab('history'), 'history')
+    for (const value of ['workspaces', null, undefined, '', 'History', 'settings', 1]) {
+      assert.equal(tabs.parseSidebarTab(value), 'workspaces', String(value))
+    }
+    const memory = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => memory.get(key) ?? null,
+      setItem: (key: string, value: string) => { memory.set(key, value) },
+    }
+    assert.equal(tabs.readStoredSidebarTab(() => storage), 'workspaces', 'nothing stored yet')
+    tabs.writeStoredSidebarTab('history', () => storage)
+    assert.equal(memory.get(tabs.SIDEBAR_TAB_STORAGE_KEY), 'history')
+    assert.equal(tabs.readStoredSidebarTab(() => storage), 'history')
+    memory.set(tabs.SIDEBAR_TAB_STORAGE_KEY, 'garbage')
+    assert.equal(tabs.readStoredSidebarTab(() => storage), 'workspaces')
+    const throwing = () => { throw new Error('storage disabled') }
+    assert.equal(tabs.readStoredSidebarTab(throwing), 'workspaces', 'unavailable storage reads as Workspaces')
+    assert.doesNotThrow(() => tabs.writeStoredSidebarTab('history', throwing), 'unavailable storage is ignored')
+    assert.doesNotThrow(() => tabs.writeStoredSidebarTab('history', () => ({
+      setItem: () => { throw new Error('quota exceeded') },
+    })))
+  }
 
   // Sizes — binary units, one decimal below 100.
   for (const [bytes, text] of [
@@ -625,14 +657,33 @@ async function main() {
     assert.equal(actions.formatByteSize(bytes), text, String(bytes))
   }
 
-  // Locales — every modal string exists in all four locale files with identical keys.
+  // Sidebar wiring — History is a tab, not a modal opened from the footer.
   const { readFile } = await import('node:fs/promises')
-  const modalSource = await readFile('renderer/src/components/SessionHistoryModal.tsx', 'utf8')
-  const usedKeys = new Set([...modalSource.matchAll(/t\('sessionHistory\.([A-Za-z]+)'/g)].map(match => match[1]))
-  assert.ok(usedKeys.size > 20, 'modal should use sessionHistory.* strings')
-  const binKeys = new Set([...modalSource.matchAll(/tBin\('([A-Za-z]+)'/g)].map(match => match[1]))
+  const panelSource = await readFile('renderer/src/components/SessionHistoryPanel.tsx', 'utf8')
+  const sidebarSource = await readFile('renderer/src/components/Sidebar.tsx', 'utf8')
+  const appSource = await readFile('renderer/src/App.tsx', 'utf8')
+  assert.ok(sidebarSource.includes('<SessionHistoryPanel'), 'the sidebar hosts the history panel')
+  assert.ok(!sidebarSource.includes('onOpenHistory'), 'the footer no longer opens history')
+  assert.ok(!appSource.includes('SessionHistoryModal'), 'the history modal is gone')
+  assert.ok(sidebarSource.includes("active={activeTab === 'history'}"), 'polling follows tab visibility')
+  assert.ok(sidebarSource.includes('onClick={handleAddWorkspace}'), 'adding a workspace returns to the Workspaces tab')
+  assert.ok(sidebarSource.includes('onDragEnter={handleSidebarDragEnter}'), 'dragging files over the sidebar returns to the Workspaces tab')
+  assert.ok(!panelSource.includes('settings-overlay'), 'the panel itself is not a modal overlay')
+
+  // Trash dialog — every close path goes through the guard, and Escape is only captured while it is open.
+  assert.ok(panelSource.includes('trashDialogOpen ? listenForDialogEscape(window, cancelTrash) : undefined'))
+  assert.equal([...panelSource.matchAll(/listenForDialogEscape\(/g)].length, 1)
+  assert.equal([...panelSource.matchAll(/onClick=\{cancelTrash\}/g)].length, 2, 'backdrop and Cancel button')
+  assert.ok(panelSource.includes('createPortal(renderTrashDialog(trashDialog), document.body)'),
+    'the dialog stays visible over the whole window even when the tab is switched while a preview loads')
+
+  // Locales — every panel string exists in all four locale files with identical keys.
+  const usedKeys = new Set([...panelSource.matchAll(/t\('sessionHistory\.([A-Za-z]+)'/g)].map(match => match[1]))
+  assert.ok(usedKeys.size > 20, 'panel should use sessionHistory.* strings')
+  const binKeys = new Set([...panelSource.matchAll(/tBin\('([A-Za-z]+)'/g)].map(match => match[1]))
   assert.equal(binKeys.size, 10, 'Recycle Bin / Trash strings')
-  assert.ok(!modalSource.includes('onClick={onClose}'), 'every close control goes through the dismissal guard')
+  const sidebarKeys = new Set([...sidebarSource.matchAll(/t\('sidebar\.([A-Za-z]+)'/g)].map(match => match[1]))
+  for (const key of ['workspaces', 'history', 'views']) assert.ok(sidebarKeys.has(key), `sidebar uses sidebar.${key}`)
   let referenceTrashKeys: string[] | null = null
   const settingsSource = await readFile('renderer/src/components/SettingsPanel.tsx', 'utf8')
   const settingsKeys = new Set([...settingsSource.matchAll(/t\('settings\.(sessionHistory[A-Za-z]*)'/g)].map(match => match[1]))
@@ -644,7 +695,7 @@ async function main() {
       settings: Record<string, string>
       sessionHistory: Record<string, string>
     }
-    assert.ok(translations.sidebar.history, `${locale} sidebar.history`)
+    for (const key of sidebarKeys) assert.ok(translations.sidebar[key], `${locale} is missing sidebar.${key}`)
     for (const key of settingsKeys) assert.ok(translations.settings[key], `${locale} is missing settings.${key}`)
     const keys = Object.keys(translations.sessionHistory).sort()
     if (referenceKeys) assert.deepEqual(keys, referenceKeys, `${locale} sessionHistory keys must match en`)

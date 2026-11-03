@@ -18,7 +18,6 @@ import { MarkdownPreviewPanel } from './components/MarkdownPreviewPanel'
 import { WorkspaceEnvDialog } from './components/WorkspaceEnvDialog'
 import { ResizeHandle } from './components/ResizeHandle'
 import { ProfilePanel } from './components/ProfilePanel'
-import { SessionHistoryModal } from './components/SessionHistoryModal'
 import { ProfileWindowCloseDialog } from './components/ProfileWindowCloseDialog'
 import { FolderPicker } from './components/FolderPicker'
 import { consumeKeyboardShortcut, isBackquoteShortcutEvent } from './utils/keyboard-shortcuts'
@@ -146,8 +145,6 @@ export default function App() {
   const [state, setState] = useState<AppState>(workspaceStore.getState())
   const [showSettings, setShowSettings] = useState(false)
   const [showProfiles, setShowProfiles] = useState(false)
-  const [showSessionHistory, setShowSessionHistory] = useState(false)
-  const closeSessionHistory = useCallback(() => setShowSessionHistory(false), [])
   const [folderPickerInitialPath, setFolderPickerInitialPath] = useState<string | undefined>(undefined)
   const [folderPickerOpen, setFolderPickerOpen] = useState(false)
   const [activeProfileName, setActiveProfileName] = useState<string>('Default')
@@ -1316,7 +1313,9 @@ export default function App() {
         onDetachWorkspace={handleDetachWorkspace}
         activeProfileName={activeProfileName}
         isRemoteConnected={isRemoteConnected}
-        onOpenHistory={() => setShowSessionHistory(true)}
+        remoteHostLabel={activeProfileIsRemote ? activeProfileName.replace(/:\d+$/, '') : undefined}
+        remoteOrigin={activeProfileIsRemote ? activeRemoteOrigin : null}
+        detachedWorkspaceIds={detachedIds}
         onOpenProfiles={() => setShowProfiles(true)}
         onOpenSettings={() => setShowSettings(true)}
       />
@@ -1449,14 +1448,6 @@ export default function App() {
           onClose={() => setShowSettings(false)}
           isRemoteProfile={activeProfileIsRemote}
           remoteOrigin={activeRemoteOrigin}
-        />
-      )}
-      {showSessionHistory && (
-        <SessionHistoryModal
-          onClose={closeSessionHistory}
-          remoteHostLabel={activeProfileIsRemote ? activeProfileName.replace(/:\d+$/, '') : undefined}
-          remoteOrigin={activeProfileIsRemote ? activeRemoteOrigin : null}
-          detachedWorkspaceIds={detachedIds}
         />
       )}
       {folderPickerOpen && (

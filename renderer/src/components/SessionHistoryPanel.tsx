@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import { host } from '../host-api'
@@ -20,13 +21,13 @@ import {
   canAddGroupAsWorkspace,
   ensureWorkspace,
   formatByteSize,
-  listenForModalEscape,
-  modalDismissAction,
+  listenForDialogEscape,
   previewTrashInBatches,
   resumeInWorkspace,
   resumeUnavailableReason,
   selectTrashableSessions,
   sessionAgentPreset,
+  sessionHistoryActivationLoad,
   sessionHistoryListOptions,
   sessionRefKey,
   sessionResumeCommand,
@@ -34,6 +35,7 @@ import {
   summarizeTrashResult,
   trashableRefsFromPreview,
   trashBinKind,
+  trashDialogDismissAction,
   trashInBatches,
   trashTextKey,
   type ResumeUnavailableReason,
@@ -43,8 +45,11 @@ import {
 } from '../utils/session-history-actions'
 import '../styles/session-history.css'
 
-interface SessionHistoryModalProps {
-  onClose: () => void
+interface SessionHistoryPanelProps {
+  /** Polling runs only while the panel is visible. */
+  active: boolean
+  /** Called after a resume or "go to workspace" changed the main area. */
+  onWorkspaceShown: () => void
   remoteHostLabel?: string
   remoteOrigin?: string | null
   /** Workspaces shown in their own window; the main window does not render them. */
@@ -107,8 +112,9 @@ function resumeCommandHint(entry: SessionHistoryEntry, t: TFunction): string {
     : t('sessionHistory.resumeNoCwd')
 }
 
-function isDefaultCollapsed(group: SessionHistoryGroup): boolean {
-  return group.kind === 'missing'
+// Groups start collapsed; while searching they open so matches are visible.
+function isDefaultCollapsed(group: SessionHistoryGroup, searching: boolean): boolean {
+  return !searching || group.kind === 'missing'
 }
 
 function trashBlockReasonText(reason: TrashBlockReason, t: TFunction): string {
@@ -126,6 +132,32 @@ function trashSummaryText(summary: SessionTrashSummary, t: TFunction, tBin: Tras
   return parts.join(' · ')
 }
 
+function Icon({ children }: Readonly<{ children: ReactNode }>) {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  )
+}
+
+const ICON_PLUS = <Icon><path d="M12 5v14M5 12h14" /></Icon>
+const ICON_GO = <Icon><path d="M5 12h14M13 6l6 6-6 6" /></Icon>
+const ICON_WINDOW = <Icon><rect x="3" y="4" width="18" height="14" rx="2" /><path d="M3 8h18" /></Icon>
+const ICON_TRASH = (
+  <Icon><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></Icon>
+)
+const ICON_FILTER = <Icon><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" /></Icon>
+
 interface TrashDialogState {
   preview: SessionTrashPreview
   skippedOpen: number
@@ -137,12 +169,13 @@ interface TrashOutcome {
   result: SessionTrashResult
 }
 
-export function SessionHistoryModal({
-  onClose,
+export function SessionHistoryPanel({
+  active,
+  onWorkspaceShown,
   remoteHostLabel,
   remoteOrigin,
   detachedWorkspaceIds = NO_DETACHED_WORKSPACES,
-}: Readonly<SessionHistoryModalProps>) {
+}: Readonly<SessionHistoryPanelProps>) {
   const { t } = useTranslation()
   const [result, setResult] = useState<SessionHistoryResult | null>(null)
   const [loading, setLoading] = useState(true)
@@ -161,6 +194,7 @@ export function SessionHistoryModal({
   const [trashOutcome, setTrashOutcome] = useState<TrashOutcome | null>(null)
   const requestSeq = useRef(0)
   const listsInFlight = useRef(0)
+  const activatedBefore = useRef(false)
   const trashBusyRef = useRef(false)
   const trashDialogRef = useRef<TrashDialogState | null>(null)
   const trashDialogElement = useRef<HTMLDivElement | null>(null)
@@ -209,20 +243,30 @@ export function SessionHistoryModal({
     }
   }, [])
 
+  const isBusy = useCallback(() => listsInFlight.current > 0 || trashBusyRef.current, [])
+
   useEffect(() => {
     mounted.current = true
-    void load(false)
     return () => {
       mounted.current = false
       requestSeq.current++
+      // A remount discards in-flight results, so the next activation must load in the foreground again.
+      activatedBefore.current = false
     }
-  }, [load])
+  }, [])
 
-  useEffect(() => startSessionHistoryPolling({
-    poll: () => { void load(false, true) },
-    isBusy: () => listsInFlight.current > 0 || trashBusyRef.current,
-    isHidden: () => document.hidden,
-  }), [load])
+  useEffect(() => {
+    if (!active) return undefined
+    const action = sessionHistoryActivationLoad({ activatedBefore: activatedBefore.current, busy: isBusy() })
+    activatedBefore.current = true
+    if (action === 'initial') void load(false)
+    else if (action === 'background') void load(false, true)
+    return startSessionHistoryPolling({
+      poll: () => { void load(false, true) },
+      isBusy,
+      isHidden: () => document.hidden,
+    })
+  }, [active, isBusy, load])
 
   useEffect(() => () => {
     if (copyTimer.current) clearTimeout(copyTimer.current)
@@ -232,13 +276,12 @@ export function SessionHistoryModal({
     trashDialogRef.current = trashDialog
   }, [trashDialog])
 
-  const dismiss = useCallback(() => {
-    const action = modalDismissAction({ trashBusy: trashBusyRef.current, dialog: trashDialogRef.current })
-    if (action === 'close-modal') onClose()
-    else if (action === 'close-dialog') setTrashDialog(null)
-  }, [onClose])
+  const cancelTrash = useCallback(() => {
+    if (trashDialogDismissAction(trashDialogRef.current) === 'close-dialog') setTrashDialog(null)
+  }, [])
 
-  useEffect(() => listenForModalEscape(window, dismiss), [dismiss])
+  const trashDialogOpen = trashDialog !== null
+  useEffect(() => (trashDialogOpen ? listenForDialogEscape(window, cancelTrash) : undefined), [trashDialogOpen, cancelTrash])
 
   // Confirming disables both dialog buttons; without this, focus falls back to the page behind the dialog.
   const trashConfirming = trashDialog?.confirming ?? false
@@ -249,13 +292,13 @@ export function SessionHistoryModal({
   const keepFocusInDialog = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Tab') return
     const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
-    const active = document.activeElement
+    const focused = document.activeElement
     if (buttons.length === 0) {
       event.preventDefault()
-    } else if (event.shiftKey && (active === buttons[0] || active === event.currentTarget)) {
+    } else if (event.shiftKey && (focused === buttons[0] || focused === event.currentTarget)) {
       event.preventDefault()
       buttons[buttons.length - 1].focus()
-    } else if (!event.shiftKey && active === buttons[buttons.length - 1]) {
+    } else if (!event.shiftKey && focused === buttons[buttons.length - 1]) {
       event.preventDefault()
       buttons[0].focus()
     }
@@ -302,13 +345,13 @@ export function SessionHistoryModal({
     setTrashDialog(confirming)
     setTrashBusyState(true)
     try {
-      const { result, batches, rejected } = await trashInBatches(
+      const { result: merged, batches, rejected } = await trashInBatches(
         sessions,
         batch => host.sessionHistory.trash(batch),
         t('sessionHistory.trashNotAttempted'),
       )
-      const summary = summarizeTrashResult(result)
-      setTrashOutcome({ summary, result })
+      const summary = summarizeTrashResult(merged)
+      setTrashOutcome({ summary, result: merged })
       logHistory('trash done', {
         requested: sessions.length,
         batches,
@@ -328,11 +371,6 @@ export function SessionHistoryModal({
       if (mounted.current) void load(false)
     }
   }, [load, setTrashBusyState, t, tBin])
-
-  const cancelTrash = useCallback(() => {
-    if (trashDialogRef.current?.confirming) return
-    setTrashDialog(null)
-  }, [])
 
   const caseInsensitive = result?.caseInsensitivePaths ?? true
   const view = useMemo(() => (
@@ -368,8 +406,8 @@ export function SessionHistoryModal({
   const handleGoToWorkspace = useCallback((workspace: Workspace) => {
     if (trashBusyRef.current || detachedWorkspaceIds.has(workspace.id)) return
     workspaceStore.setActiveWorkspace(workspace.id)
-    onClose()
-  }, [detachedWorkspaceIds, onClose])
+    onWorkspaceShown()
+  }, [detachedWorkspaceIds, onWorkspaceShown])
 
   const handleResume = useCallback((entry: SessionHistoryEntry, group: SessionHistoryGroup) => {
     if (trashBusyRef.current) return
@@ -380,8 +418,8 @@ export function SessionHistoryModal({
       setActionError(resumeReasonText(outcome.reason, entry, t))
       return
     }
-    onClose()
-  }, [caseInsensitive, detachedWorkspaceIds, onClose, t])
+    onWorkspaceShown()
+  }, [caseInsensitive, detachedWorkspaceIds, onWorkspaceShown, t])
 
   const handleCopy = useCallback((key: string, text: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -391,6 +429,13 @@ export function SessionHistoryModal({
     }).catch(error => {
       logHistory('copy failed', { error: errorText(error) })
     })
+  }, [])
+
+  // The active agent panel handles Escape on window (deny permission, interrupt the turn); keep it in the search box.
+  const handleSearchKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Escape') return
+    event.stopPropagation()
+    setQuery('')
   }, [])
 
   const handleCardKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>, id: string) => {
@@ -403,6 +448,15 @@ export function SessionHistoryModal({
   const scan = result?.scan
   const hasSessions = (result?.sessions.length ?? 0) > 0
   const trimmedQuery = query.trim()
+  let scanText = ''
+  if (loading && result) {
+    scanText = t('sessionHistory.scanning')
+  } else if (!loading && scan) {
+    const parts = [t('sessionHistory.scanSummary', { count: scan.fileCount, time: formatRelativeTime(scan.scannedAt, now, t) })]
+    if (scan.skippedLines > 0) parts.push(t('sessionHistory.skippedLines', { count: scan.skippedLines }))
+    if (scan.failedCount > 0) parts.push(t('sessionHistory.failedFiles', { count: scan.failedCount }))
+    scanText = parts.join(' · ')
+  }
 
   const renderCard = (entry: SessionHistoryEntry, group: SessionHistoryGroup, workspace: Workspace | undefined) => {
     const expanded = expandedId === entry.id
@@ -414,6 +468,7 @@ export function SessionHistoryModal({
     const resumeCommand = sessionResumeCommand(entry)
     const idCopyKey = `id:${entry.id}`
     const commandCopyKey = `cmd:${entry.id}`
+    const hasExtraMeta = entry.subagentCount > 0 || !!entry.model || !!entry.gitBranch
     return (
       <div
         key={`${entry.agent}:${entry.id}`}
@@ -432,6 +487,10 @@ export function SessionHistoryModal({
               {entry.agent === 'claude' ? t('sessionHistory.agentClaude') : t('sessionHistory.agentCodex')}
             </span>
             <span className="session-history-card-title" title={entry.title}>{entry.title}</span>
+          </div>
+          <div className="session-history-card-meta">
+            <span title={formatAbsoluteTime(entry.updatedAt, t)}>{formatRelativeTime(entry.updatedAt, now, t)}</span>
+            <span>{t('sessionHistory.messageCount', { count: entry.messageCount })}</span>
             {entry.interactive === false && (
               <span className="session-history-tag">{t('sessionHistory.tagNonInteractive')}</span>
             )}
@@ -439,22 +498,20 @@ export function SessionHistoryModal({
               <span className="session-history-tag">{t('sessionHistory.tagArchived')}</span>
             )}
             {owner && <span className="session-history-open-badge">{t('sessionHistory.alreadyOpen')}</span>}
-            <span className="session-history-card-time" title={formatAbsoluteTime(entry.updatedAt, t)}>
-              {formatRelativeTime(entry.updatedAt, now, t)}
-            </span>
-          </div>
-          {entry.lastReply && <div className="session-history-card-reply">{entry.lastReply}</div>}
-          <div className="session-history-card-meta">
-            <span>{t('sessionHistory.messageCount', { count: entry.messageCount })}</span>
-            {entry.subagentCount > 0 && (
-              <span>{t('sessionHistory.subagentCount', { count: entry.subagentCount })}</span>
-            )}
-            {entry.model && <span>{entry.model}</span>}
-            {entry.gitBranch && <span>⎇ {entry.gitBranch}</span>}
           </div>
         </div>
         {expanded && (
           <div className="session-history-card-detail">
+            {entry.lastReply && <div className="session-history-card-reply">{entry.lastReply}</div>}
+            {hasExtraMeta && (
+              <div className="session-history-card-meta">
+                {entry.subagentCount > 0 && (
+                  <span>{t('sessionHistory.subagentCount', { count: entry.subagentCount })}</span>
+                )}
+                {entry.model && <span>{entry.model}</span>}
+                {entry.gitBranch && <span>⎇ {entry.gitBranch}</span>}
+              </div>
+            )}
             <dl>
               {entry.firstPrompt && (
                 <>
@@ -513,11 +570,55 @@ export function SessionHistoryModal({
     )
   }
 
-  const renderGroup = (group: SessionHistoryGroup, sessions: SessionHistoryEntry[], workspace: Workspace | undefined) => {
-    const collapsed = isDefaultCollapsed(group) !== toggledGroups.has(group.key)
+  const renderGroupStatus = (group: SessionHistoryGroup, workspace: Workspace | undefined) => {
+    if (workspace) {
+      if (detachedWorkspaceIds.has(workspace.id)) {
+        return (
+          <span
+            className="session-history-status-icon"
+            role="img"
+            aria-label={t('sessionHistory.inDetachedWindow')}
+            title={t('sessionHistory.resumeDetached')}
+          >
+            {ICON_WINDOW}
+          </span>
+        )
+      }
+      const goLabel = `${t('sessionHistory.inWorkspace')} · ${t('sessionHistory.goToWorkspace')}`
+      return (
+        <button
+          type="button"
+          className="session-history-icon-btn ok"
+          title={goLabel}
+          aria-label={goLabel}
+          onClick={() => handleGoToWorkspace(workspace)}
+        >
+          {ICON_GO}
+        </button>
+      )
+    }
+    if (group.kind === 'missing') return null
     const addable = canAddGroupAsWorkspace(group)
-    const detached = !!workspace && detachedWorkspaceIds.has(workspace.id)
+    return (
+      <button
+        type="button"
+        className="session-history-icon-btn primary"
+        disabled={!addable}
+        title={addable ? t('sessionHistory.addWorkspace') : t('sessionHistory.cannotAddWorkspace')}
+        aria-label={t('sessionHistory.addWorkspace')}
+        onClick={() => handleAddWorkspace(group)}
+      >
+        {ICON_PLUS}
+      </button>
+    )
+  }
+
+  const renderGroup = (group: SessionHistoryGroup, sessions: SessionHistoryEntry[], workspace: Workspace | undefined) => {
+    const collapsed = isDefaultCollapsed(group, query.trim() !== '') !== toggledGroups.has(group.key)
     const trashable = group.kind === 'missing' ? selectTrashableSessions(sessions, workspaceStore).sessions.length : 0
+    const countText = group.worktreeCount > 0
+      ? `${t('sessionHistory.sessionCount', { count: sessions.length })} · ${t('sessionHistory.worktreeCount', { count: group.worktreeCount })}`
+      : t('sessionHistory.sessionCount', { count: sessions.length })
     return (
       <div key={group.key} className={`session-history-group${group.kind === 'missing' ? ' missing' : ''}`}>
         <div className="session-history-group-head">
@@ -525,62 +626,43 @@ export function SessionHistoryModal({
             type="button"
             className="session-history-group-toggle"
             aria-expanded={!collapsed}
+            title={group.rootPath ?? undefined}
             onClick={() => toggleGroup(group.key)}
           >
             <span className="session-history-caret">{collapsed ? '▸' : '▾'}</span>
-            <span className="session-history-group-name">
-              {group.kind === 'unknown' ? t('sessionHistory.unknownFolder') : group.name}
+            <span className="session-history-group-text">
+              <span className="session-history-group-name">
+                {group.kind === 'unknown' ? t('sessionHistory.unknownFolder') : group.name}
+              </span>
+              {group.rootPath && <span className="session-history-group-path">{group.rootPath}</span>}
             </span>
-            {group.rootPath && (
-              <span className="session-history-group-path" title={group.rootPath}>{group.rootPath}</span>
-            )}
           </button>
-          <span className="session-history-count">
-            {t('sessionHistory.sessionCount', { count: sessions.length })}
-            {group.worktreeCount > 0 && ` · ${t('sessionHistory.worktreeCount', { count: group.worktreeCount })}`}
-          </span>
+          <span className="session-history-count" title={countText} aria-label={countText}>{sessions.length}</span>
           {group.kind === 'missing' && (
-            <span className="session-history-badge warn">⚠ {t('sessionHistory.folderMissing')}</span>
-          )}
-          {group.kind === 'missing' && (
-            <button
-              type="button"
-              className="session-history-btn danger"
-              disabled={trashable === 0 || trashBusy}
-              title={trashable === 0
-                ? t('sessionHistory.trashNothingVisible')
-                : t('sessionHistory.moveAllToTrashHint', { count: trashable })}
-              onClick={() => void requestTrash(sessions)}
-            >
-              {tBin('moveAllToTrash')}
-            </button>
-          )}
-          {workspace ? (
             <>
-              <span className="session-history-badge ok">
-                ✓ {detached ? t('sessionHistory.inDetachedWindow') : t('sessionHistory.inWorkspace')}
+              <span
+                className="session-history-status-icon warn"
+                role="img"
+                aria-label={t('sessionHistory.folderMissing')}
+                title={t('sessionHistory.folderMissing')}
+              >
+                ⚠
               </span>
               <button
                 type="button"
-                className="session-history-btn"
-                disabled={detached}
-                title={detached ? t('sessionHistory.resumeDetached') : undefined}
-                onClick={() => handleGoToWorkspace(workspace)}
+                className="session-history-icon-btn danger"
+                disabled={trashable === 0 || trashBusy}
+                title={trashable === 0
+                  ? t('sessionHistory.trashNothingVisible')
+                  : `${tBin('moveAllToTrash')} ${t('sessionHistory.moveAllToTrashHint', { count: trashable })}`}
+                aria-label={tBin('moveAllToTrash')}
+                onClick={() => void requestTrash(sessions)}
               >
-                {t('sessionHistory.goToWorkspace')}
+                {ICON_TRASH}
               </button>
             </>
-          ) : (
-            <button
-              type="button"
-              className="session-history-btn primary"
-              disabled={!addable}
-              title={addable ? undefined : t('sessionHistory.cannotAddWorkspace')}
-              onClick={() => handleAddWorkspace(group)}
-            >
-              {t('sessionHistory.addWorkspace')}
-            </button>
           )}
+          {renderGroupStatus(group, workspace)}
         </div>
         {!collapsed && (
           <div className="session-history-cards">
@@ -733,31 +815,58 @@ export function SessionHistoryModal({
   )
 
   return (
-    <div className="settings-overlay" onClick={dismiss}>
-      <div
-        className="settings-panel session-history-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('sessionHistory.title')}
-        onClick={event => event.stopPropagation()}
-      >
-        <div className="settings-header session-history-header">
-          <h2>{t('sessionHistory.title')}</h2>
+    <div className="session-history-sidebar" role="region" hidden={!active} aria-label={t('sessionHistory.title')}>
+      <div className="session-history-toolbar">
+        <input
+          className="session-history-search"
+          type="search"
+          value={query}
+          placeholder={t('sessionHistory.searchPlaceholder')}
+          title={t('sessionHistory.searchPlaceholder')}
+          onChange={event => setQuery(event.target.value)}
+          onKeyDown={handleSearchKeyDown}
+        />
+        <div className="session-history-filters">
+          <select
+            className="session-history-select"
+            value={agentFilter}
+            aria-label={t('sessionHistory.agentFilter')}
+            title={t('sessionHistory.agentFilter')}
+            onChange={event => setAgentFilter(event.target.value as SessionHistoryAgentFilter)}
+          >
+            <option value="all">{t('sessionHistory.agentAll')}</option>
+            <option value="claude">{t('sessionHistory.agentClaude')}</option>
+            <option value="codex">{t('sessionHistory.agentCodex')}</option>
+          </select>
+          <select
+            className="session-history-select"
+            value={sort}
+            aria-label={t('sessionHistory.sortLabel')}
+            title={t('sessionHistory.sortLabel')}
+            onChange={event => setSort(event.target.value as SessionHistorySort)}
+          >
+            <option value="updated">{t('sessionHistory.sortUpdated')}</option>
+            <option value="started">{t('sessionHistory.sortStarted')}</option>
+            <option value="messages">{t('sessionHistory.sortMessages')}</option>
+          </select>
+          <button
+            type="button"
+            className={`session-history-icon-btn${onlyNotAdded ? ' active' : ''}`}
+            aria-pressed={onlyNotAdded}
+            title={t('sessionHistory.onlyNotAdded')}
+            aria-label={t('sessionHistory.onlyNotAdded')}
+            onClick={() => setOnlyNotAdded(value => !value)}
+          >
+            {ICON_FILTER}
+          </button>
+        </div>
+        <div className="session-history-status">
           {remoteHostLabel && (
-            <span className="session-history-chip remote" title={remoteOrigin ?? undefined}>
+            <span className="session-history-chip remote" title={remoteOrigin ?? remoteHostLabel}>
               {t('sessionHistory.remoteHost', { host: remoteHostLabel })}
             </span>
           )}
-          <span className="session-history-scan">
-            {loading && result && t('sessionHistory.scanning')}
-            {!loading && scan && (
-              <>
-                {t('sessionHistory.scanSummary', { count: scan.fileCount, time: formatRelativeTime(scan.scannedAt, now, t) })}
-                {scan.skippedLines > 0 && ` · ${t('sessionHistory.skippedLines', { count: scan.skippedLines })}`}
-                {scan.failedCount > 0 && ` · ${t('sessionHistory.failedFiles', { count: scan.failedCount })}`}
-              </>
-            )}
-          </span>
+          <span className="session-history-scan" title={scanText || undefined}>{scanText}</span>
           <button
             type="button"
             className={`session-history-icon-btn${loading ? ' spinning' : ''}`}
@@ -768,70 +877,20 @@ export function SessionHistoryModal({
           >
             ⟳
           </button>
-          <button
-            type="button"
-            className="settings-close"
-            onClick={dismiss}
-            title={t('sessionHistory.close')}
-            aria-label={t('sessionHistory.close')}
-          >
-            &times;
-          </button>
         </div>
-        <div className="session-history-toolbar">
-          <input
-            className="session-history-search"
-            type="search"
-            value={query}
-            autoFocus
-            placeholder={t('sessionHistory.searchPlaceholder')}
-            onChange={event => setQuery(event.target.value)}
-          />
-          <div className="session-history-segment" role="group" aria-label={t('sessionHistory.agentFilter')}>
-            {(['all', 'claude', 'codex'] as const).map(value => (
-              <button
-                key={value}
-                type="button"
-                className={agentFilter === value ? 'active' : ''}
-                aria-pressed={agentFilter === value}
-                onClick={() => setAgentFilter(value)}
-              >
-                {value === 'all'
-                  ? t('sessionHistory.agentAll')
-                  : value === 'claude' ? t('sessionHistory.agentClaude') : t('sessionHistory.agentCodex')}
-              </button>
-            ))}
-          </div>
-          <label className="session-history-sort">
-            <span>{t('sessionHistory.sortLabel')}</span>
-            <select value={sort} onChange={event => setSort(event.target.value as SessionHistorySort)}>
-              <option value="updated">{t('sessionHistory.sortUpdated')}</option>
-              <option value="started">{t('sessionHistory.sortStarted')}</option>
-              <option value="messages">{t('sessionHistory.sortMessages')}</option>
-            </select>
-          </label>
-          <label className="session-history-toggle">
-            <input
-              type="checkbox"
-              checked={onlyNotAdded}
-              onChange={event => setOnlyNotAdded(event.target.checked)}
-            />
-            <span>{t('sessionHistory.onlyNotAdded')}</span>
-          </label>
-        </div>
-        {result && loadError && (
-          <div className="session-history-banner error">{t('sessionHistory.loadFailed', { error: loadError })}</div>
-        )}
-        {scan && !scan.gitAvailable && (
-          <div className="session-history-banner warn">⚠ {t('sessionHistory.gitUnavailable')}</div>
-        )}
-        {actionError && <div className="session-history-banner error">{actionError}</div>}
-        {trashOutcome && renderTrashOutcome(trashOutcome)}
-        <div className="session-history-list">
-          {renderBody()}
-        </div>
-        {trashDialog && renderTrashDialog(trashDialog)}
       </div>
+      {result && loadError && (
+        <div className="session-history-banner error">{t('sessionHistory.loadFailed', { error: loadError })}</div>
+      )}
+      {scan && !scan.gitAvailable && (
+        <div className="session-history-banner warn">⚠ {t('sessionHistory.gitUnavailable')}</div>
+      )}
+      {actionError && <div className="session-history-banner error">{actionError}</div>}
+      {trashOutcome && renderTrashOutcome(trashOutcome)}
+      <div className="session-history-list">
+        {renderBody()}
+      </div>
+      {trashDialog && createPortal(renderTrashDialog(trashDialog), document.body)}
     </div>
   )
 }

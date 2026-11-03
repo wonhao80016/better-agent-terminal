@@ -99,13 +99,58 @@ body {
 }
 
 .sidebar-header {
-  padding: 16px;
+  padding: 0 12px 0 8px;
+  min-height: 50px;
   font-weight: 600;
   font-size: 14px;
   border-bottom: 1px solid var(--border-color);
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: space-between;
+  gap: 6px;
+}
+
+.sidebar-tabs {
+  display: flex;
+  min-width: 0;
+  gap: 2px;
+}
+
+.sidebar-tab {
+  min-width: 0;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sidebar-tab:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-color);
+}
+
+.sidebar-tab:focus-visible {
+  outline: 1px solid var(--accent-color);
+  outline-offset: -1px;
+}
+
+.sidebar-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 .sidebar-profile-badge {

@@ -265,6 +265,7 @@
     "profiles": "Profiles",
     "settings": "Settings",
     "history": "History",
+    "views": "Sidebar views",
     "connectedToRemote": "Connected to remote host",
     "clickToManageProfiles": "Click to manage profiles",
     "dragToReorder": "Drag to reorder",

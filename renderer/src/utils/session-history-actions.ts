@@ -267,15 +267,19 @@ export function trashTextKey(key: string, kind: TrashBinKind): string {
   return kind === 'trash' ? `sessionHistory.osTrash.${key}` : `sessionHistory.${key}`
 }
 
-export type ModalDismissAction = 'close-modal' | 'close-dialog' | 'ignore'
+export type TrashDialogDismissAction = 'close-dialog' | 'ignore'
 
-/** A pending preview or a running move keeps the modal open so its result is not lost. */
-export function modalDismissAction(state: {
-  trashBusy: boolean
-  dialog: { confirming: boolean } | null
-}): ModalDismissAction {
-  if (state.dialog) return state.dialog.confirming ? 'ignore' : 'close-dialog'
-  return state.trashBusy ? 'ignore' : 'close-modal'
+/** A running move keeps the dialog open so its result is not lost. */
+export function trashDialogDismissAction(dialog: { confirming: boolean } | null): TrashDialogDismissAction {
+  return dialog && !dialog.confirming ? 'close-dialog' : 'ignore'
+}
+
+export type SessionHistoryActivationLoad = 'initial' | 'background' | 'skip'
+
+/** The first activation shows the loading state; later ones refresh quietly unless a request is still running. */
+export function sessionHistoryActivationLoad(state: { activatedBefore: boolean; busy: boolean }): SessionHistoryActivationLoad {
+  if (!state.activatedBefore) return 'initial'
+  return state.busy ? 'skip' : 'background'
 }
 
 export function summarizeTrashResult(result: SessionTrashResult): SessionTrashSummary {
@@ -311,18 +315,18 @@ export function sessionResumeCommand(entry: Pick<SessionHistoryEntry, 'agent' | 
 }
 
 /**
- * Closes on Escape in the capture phase so the key never reaches the agent panels' window keydown listeners,
- * where it would deny a pending permission or interrupt a streaming turn behind the modal. Returns the unbinder.
+ * Handles Escape in the capture phase so the key never reaches the agent panels' window keydown listeners,
+ * where it would deny a pending permission or interrupt a streaming turn behind the dialog. Returns the unbinder.
  */
-export function listenForModalEscape(
+export function listenForDialogEscape(
   target: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>,
-  onClose: () => void,
+  onEscape: () => void,
 ): () => void {
   const handler = (event: Event) => {
     if ((event as KeyboardEvent).key !== 'Escape') return
     event.preventDefault()
     event.stopImmediatePropagation()
-    onClose()
+    onEscape()
   }
   target.addEventListener('keydown', handler, true)
   return () => target.removeEventListener('keydown', handler, true)

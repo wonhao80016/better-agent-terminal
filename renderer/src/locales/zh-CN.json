@@ -256,6 +256,7 @@
     "profiles": "配置文件",
     "settings": "设置",
     "history": "历史记录",
+    "views": "侧栏视图",
     "connectedToRemote": "已连接至远程主机",
     "clickToManageProfiles": "点击管理配置文件",
     "dragToReorder": "拖拽以重新排序",

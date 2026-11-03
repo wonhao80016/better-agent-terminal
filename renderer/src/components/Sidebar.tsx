@@ -6,6 +6,13 @@ import { WORKSPACE_COLORS } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
 import { ActivityIndicator } from './ActivityIndicator'
 import { NotificationBell } from './NotificationBell'
+import { SessionHistoryPanel } from './SessionHistoryPanel'
+import {
+  SIDEBAR_TABS,
+  readStoredSidebarTab,
+  writeStoredSidebarTab,
+  type SidebarTab,
+} from '../utils/sidebar-tab'
 import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-native-drop'
 import {
   WORKSPACE_MOVE_MIME,
@@ -69,6 +76,9 @@ interface SidebarProps {
   activeGroup: string | null
   activeProfileName?: string
   isRemoteConnected?: boolean
+  remoteHostLabel?: string
+  remoteOrigin?: string | null
+  detachedWorkspaceIds: ReadonlySet<string>
   onSetActiveGroup: (group: string | null) => void
   onSetWorkspaceGroup: (id: string, group: string | undefined) => void
   onSelectWorkspace: (id: string) => void
@@ -78,7 +88,6 @@ interface SidebarProps {
   onReorderWorkspaces: (workspaceIds: string[]) => void
   onOpenEnvVars: (workspaceId: string) => void
   onDetachWorkspace: (workspaceId: string) => void
-  onOpenHistory: () => void
   onOpenProfiles: () => void
   onOpenSettings: () => void
 }
@@ -92,6 +101,9 @@ export function Sidebar({
   activeGroup,
   activeProfileName,
   isRemoteConnected,
+  remoteHostLabel,
+  remoteOrigin,
+  detachedWorkspaceIds,
   onSetActiveGroup,
   onSetWorkspaceGroup,
   onSelectWorkspace,
@@ -101,7 +113,6 @@ export function Sidebar({
   onReorderWorkspaces,
   onOpenEnvVars,
   onDetachWorkspace,
-  onOpenHistory,
   onOpenProfiles,
   onOpenSettings,
 }: Readonly<SidebarProps>) {
@@ -116,10 +127,14 @@ export function Sidebar({
   const [githubUrl, setGithubUrl] = useState<string | null>(null)
   const [groupEditTarget, setGroupEditTarget] = useState<string | null>(null)
   const [groupEditValue, setGroupEditValue] = useState('')
+  const [activeTab, setActiveTab] = useState<SidebarTab>(readStoredSidebarTab)
+  // The history panel stays mounted after its first view so filters and a running move survive tab switches.
+  const [historyMounted, setHistoryMounted] = useState(activeTab === 'history')
   const inputRef = useRef<HTMLInputElement>(null)
   const groupInputRef = useRef<HTMLInputElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const workspaceListRef = useRef<HTMLDivElement>(null)
+  const sidebarRef = useRef<HTMLElement>(null)
   // Latest workspaces / reorder callback kept in refs so the native Tauri drop
   // listener can reorder without re-subscribing on every render.
   const workspacesRef = useRef(workspaces)
@@ -163,6 +178,47 @@ export function Sidebar({
   const usePointerReorder = isTauri() && host.platform === 'win32'
   const pointerDragRef = useRef<{ id: string; startX: number; startY: number; active: boolean } | null>(null)
   const didPointerDragRef = useRef(false)
+
+  const selectTab = useCallback((tab: SidebarTab) => {
+    setActiveTab(tab)
+    if (tab === 'history') setHistoryMounted(true)
+    writeStoredSidebarTab(tab)
+  }, [])
+
+  const showWorkspacesTab = useCallback(() => selectTab('workspaces'), [selectTab])
+
+  const handleAddWorkspace = useCallback(() => {
+    showWorkspacesTab()
+    onAddWorkspace()
+  }, [onAddWorkspace, showWorkspacesTab])
+
+  const handleSidebarDragEnter = useCallback((e: React.DragEvent) => {
+    if (activeTab === 'history' && Array.from(e.dataTransfer.types).includes('Files')) {
+      showWorkspacesTab()
+    }
+  }, [activeTab, showWorkspacesTab])
+
+  // Tauri only reports paths on 'enter'; later 'over' events carry a position alone.
+  const nativeFileDragRef = useRef(false)
+  useEffect(() => {
+    return listenTauriNativeDrop((detail) => {
+      if (detail.type === 'enter') nativeFileDragRef.current = detail.paths.length > 0
+      else if (detail.type === 'leave' || detail.type === 'drop') nativeFileDragRef.current = false
+    })
+  }, [])
+
+  useEffect(() => {
+    if (activeTab !== 'history') return undefined
+    return listenTauriNativeDrop((detail) => {
+      if (
+        (detail.type === 'enter' || detail.type === 'over')
+        && nativeFileDragRef.current
+        && isTauriNativeDropInside(detail, sidebarRef.current)
+      ) {
+        showWorkspacesTab()
+      }
+    })
+  }, [activeTab, showWorkspacesTab])
 
   // Filter workspaces by active group
   const filteredWorkspaces = activeGroup
@@ -600,10 +656,27 @@ export function Sidebar({
   }, [draggedId, dragPosition, workspaces, applyWorkspaceReorder, windowId, parseCrossWindowDrop, moveWorkspaceToWindow])
 
   return (
-    <aside className="sidebar" style={{ width }}>
+    <aside ref={sidebarRef} className="sidebar" style={{ width }} onDragEnter={handleSidebarDragEnter}>
       <div className="sidebar-header">
-        <span>{t('sidebar.workspaces')}</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <div className="sidebar-tabs" role="tablist" aria-label={t('sidebar.views')}>
+          {SIDEBAR_TABS.map(tab => {
+            const label = tab === 'history' ? t('sidebar.history') : t('sidebar.workspaces')
+            return (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab}
+                className={`sidebar-tab${activeTab === tab ? ' active' : ''}`}
+                title={label}
+                onClick={() => selectTab(tab)}
+              >
+                {label}
+              </button>
+            )
+          })}
+        </div>
+        <div className="sidebar-header-meta">
           {isRemoteConnected && (
             <span
               title={t('sidebar.connectedToRemote')}
@@ -627,7 +700,7 @@ export function Sidebar({
       </div>
       {/* Group Filter */}
       {groups.length > 0 && (
-        <div className="sidebar-group-filter">
+        <div className="sidebar-group-filter" hidden={activeTab !== 'workspaces'}>
           <select
             value={activeGroup || ''}
             onChange={(e) => onSetActiveGroup(e.target.value || null)}
@@ -642,6 +715,7 @@ export function Sidebar({
       <div
         ref={workspaceListRef}
         className={`workspace-list${externalDragOver ? ' external-drag-over' : ''}`}
+        hidden={activeTab !== 'workspaces'}
         onDragOver={(e) => {
           // Only react to external file drops or cross-window workspace drags (not internal workspace reorder)
           if (draggedId) return
@@ -814,15 +888,21 @@ export function Sidebar({
         )
         )}
       </div>
+      {historyMounted && (
+        <SessionHistoryPanel
+          active={activeTab === 'history'}
+          onWorkspaceShown={showWorkspacesTab}
+          remoteHostLabel={remoteHostLabel}
+          remoteOrigin={remoteOrigin}
+          detachedWorkspaceIds={detachedWorkspaceIds}
+        />
+      )}
       <div className="sidebar-footer">
         <NotificationBell />
-        <button className="add-workspace-btn" onClick={onAddWorkspace}>
+        <button className="add-workspace-btn" onClick={handleAddWorkspace}>
           {t('sidebar.addWorkspace')}
         </button>
         <div className="sidebar-footer-buttons">
-          <button className="settings-btn" onClick={onOpenHistory}>
-            {t('sidebar.history')}
-          </button>
           <button className="settings-btn" onClick={onOpenProfiles}>
             {t('sidebar.profiles')}
           </button>
