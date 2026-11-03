@@ -566,6 +566,11 @@
   },
 
   "claude": {
+    "codexSkills": {
+      "commandsGroup": "BAT",
+      "skillsGroup": "Skills",
+      "loading": "Loading Codex skills…"
+    },
     "fastModeUnsupported": "This model does not support Fast mode.",
     "fastModeBusy": "Fast changes apply from the next turn.",
     "fastModeNextTurn": "next turn",

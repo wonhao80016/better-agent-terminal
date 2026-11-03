@@ -547,6 +547,11 @@
     "daysAgo": "{{count}} 日前"
   },
   "claude": {
+    "codexSkills": {
+      "commandsGroup": "BAT",
+      "skillsGroup": "スキル",
+      "loading": "Codex スキルを読み込み中…"
+    },
     "fastModeUnsupported": "このモデルは Fast に対応していません。",
     "fastModeBusy": "Fast の変更は次のターンから適用されます。",
     "fastModeNextTurn": "次のターンから",

@@ -5,7 +5,8 @@ use crate::codex_app_server::{is_codex_agent_preset_id, should_handle_codex, Cod
 #[cfg(feature = "desktop")]
 use crate::commands::update as update_cmd;
 use crate::commands::{
-    agent as agent_cmd, app as app_cmd, claude as claude_cmd, fs as fs_cmd, git as git_cmd,
+    agent as agent_cmd, app as app_cmd, claude as claude_cmd, codex_skills as codex_skills_cmd,
+    fs as fs_cmd, git as git_cmd,
     github as github_cmd, image as image_cmd, notification as notification_cmd,
     profile as profile_cmd, pty as pty_cmd, runtime as runtime_cmd,
     session_history as session_history_cmd, settings as settings_cmd, snippet as snippet_cmd,
@@ -3143,6 +3144,7 @@ fn invoke_rust_for_remote(
             let login_id = optional_string_param(params, "loginId");
             codex.account_login_device_cancel(&ctx, login_id.as_deref())
         }
+        "codex:skills-list" => codex_skills_cmd::list_for_remote(ctx, params),
         "claude:account-mark-warning-shown" => {
             remote_app_data_dir(ctx, channel).and_then(|data_dir| {
                 account_store::mark_warning_shown(&data_dir)
@@ -4012,6 +4014,7 @@ fn remote_invoke_timeout(channel: &str) -> Duration {
         "session-history:list"
         | "session-history:trash-preview"
         | "session-history:trash" => session_history_cmd::REMOTE_TIMEOUT,
+        "codex:skills-list" => codex_skills_cmd::REMOTE_TIMEOUT,
         _ => INVOKE_TIMEOUT,
     }
 }
@@ -4210,6 +4213,28 @@ mod tests {
                 session_history_cmd::REMOTE_TIMEOUT
             );
         }
+    }
+
+    #[test]
+    fn codex_skills_list_remote_params_and_timeout() {
+        let channel = codex_skills_cmd::REMOTE_CHANNEL;
+        let request = codex_skills_cmd::SkillsListRequest::from_params(&legacy_v1_args_to_params(
+            channel,
+            &[json!("session-1"), json!("/repo"), json!(true)],
+        ))
+        .unwrap();
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.cwd.as_deref(), Some("/repo"));
+        assert!(request.force_reload);
+        assert!(codex_skills_cmd::SkillsListRequest::from_params(&legacy_v1_args_to_params(
+            channel,
+            &[]
+        ))
+        .is_err());
+        assert_eq!(
+            remote_invoke_timeout(channel),
+            codex_skills_cmd::REMOTE_TIMEOUT
+        );
     }
 
     #[test]

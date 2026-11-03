@@ -9,6 +9,7 @@ use crate::app_data;
 use crate::codex_account_store;
 use crate::codex_auth;
 use crate::commands::app as app_cmd;
+use crate::commands::codex_skills as codex_skills_cmd;
 use crate::event_hub::publish_runtime_event;
 use crate::sidecar::BridgeError;
 use crate::subprocess::hide_console_window;
@@ -37,6 +38,7 @@ use crate::host_context::HostContext;
 const DEFAULT_CODEX_MODEL: &str = "gpt-6-sol";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
+const SKILL_MENTION_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 const PENDING_TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_TURN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MSG_BUFFER_CAP: usize = 300;
@@ -189,6 +191,8 @@ struct CodexConnection {
     /// with; ensure_connection recycles the connection when a different
     /// binary resolves (managed runtime installed after a fallback spawn).
     binary_identity: String,
+    /// Lives and dies with this app-server, so a respawn or account switch starts empty.
+    skills_cache: Mutex<codex_skills_cmd::SkillsListCache>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -289,6 +293,26 @@ impl CodexConnection {
             ),
         }
         result
+    }
+
+    fn cached_skills(&self, cwd: &str) -> Option<Vec<Value>> {
+        self.skills_cache.lock().expect("codex skills cache lock").get(cwd)
+    }
+
+    /// Read before sending `skills/list`, so a skills/changed during the request discards its answer.
+    fn skills_cache_generation(&self) -> u64 {
+        self.skills_cache.lock().expect("codex skills cache lock").generation()
+    }
+
+    fn store_skills(&self, cwd: &str, generation: u64, skills: Vec<Value>) {
+        self.skills_cache
+            .lock()
+            .expect("codex skills cache lock")
+            .store(cwd, generation, skills);
+    }
+
+    fn clear_skills_cache(&self) {
+        self.skills_cache.lock().expect("codex skills cache lock").clear();
     }
 }
 
@@ -2134,6 +2158,62 @@ fn build_thread_resume_params(
     params
 }
 
+fn publish_skills_changed(app: &HostContext, session_ids: &[String]) {
+    for session_id in session_ids {
+        publish_runtime_event(
+            app,
+            codex_skills_cmd::SKILLS_CHANGED_EVENT,
+            json!({ "sessionId": session_id }),
+            "codex-app-server",
+        );
+    }
+}
+
+/// Sends `turn/start`; if an app-server without `UserInput::Skill` rejects the
+/// skill items, retries once with the text-only input.
+fn request_turn_start(
+    app: &HostContext,
+    connection: &CodexConnection,
+    session_id: &str,
+    input: &Value,
+    params_for: impl Fn(Value) -> Value,
+) -> Result<Value, String> {
+    let result = connection.request_logged(
+        app,
+        session_id,
+        "turn/start",
+        params_for(input.clone()),
+        TURN_START_TIMEOUT,
+    );
+    let Some(text_only) = turn_start_retry_without_skills(&result, input) else {
+        return result;
+    };
+    app_cmd::log_tauri(
+        app,
+        &format!(
+            "[codex-app-server] session={session_id} turn/start rejected skill inputs; retrying once without them: {}",
+            result.as_ref().err().map(String::as_str).unwrap_or_default()
+        ),
+    );
+    connection.request_logged(
+        app,
+        session_id,
+        "turn/start",
+        params_for(text_only),
+        TURN_START_TIMEOUT,
+    )
+}
+
+fn turn_start_retry_without_skills(result: &Result<Value, String>, input: &Value) -> Option<Value> {
+    let Err(err) = result else {
+        return None;
+    };
+    if is_thread_not_found_error(err) || !codex_skills_cmd::is_skill_input_rejection(err) {
+        return None;
+    }
+    codex_skills_cmd::without_skill_inputs(input)
+}
+
 fn is_thread_not_found_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("thread not found") || (lower.contains("thread") && lower.contains("not found"))
@@ -3551,6 +3631,7 @@ impl CodexAppServerState {
         // already swapped, so reap the old process off-thread; this keeps the
         // switch snappy and lets the new app-server spawn in parallel.
         let old = old?;
+        old.clear_skills_cache();
         let pid = old.pid;
         std::thread::spawn(move || old.terminate());
         Some(pid)
@@ -3770,9 +3851,11 @@ impl CodexAppServerState {
                 updates.push((session_id.clone(), session.metadata()));
             }
         }
+        let session_ids: Vec<String> = updates.iter().map(|(session_id, _)| session_id.clone()).collect();
         for (session_id, meta) in updates {
             emit(app, "claude:status", &session_id, "meta", meta);
         }
+        publish_skills_changed(app, &session_ids);
         Ok(())
     }
 
@@ -4375,9 +4458,11 @@ impl CodexAppServerState {
                 updates.push((session_id.clone(), session.metadata()));
             }
         }
+        let session_ids: Vec<String> = updates.iter().map(|(session_id, _)| session_id.clone()).collect();
         for (session_id, meta) in updates {
             emit(app, "claude:status", &session_id, "meta", meta);
         }
+        publish_skills_changed(app, &session_ids);
         app_cmd::log_tauri(
             app,
             &format!(
@@ -5074,6 +5159,7 @@ impl CodexAppServerState {
             pid,
             auth_account_id: spawn_auth_id,
             binary_identity,
+            skills_cache: Mutex::default(),
         });
 
         let app_for_reader = app.clone();
@@ -5774,6 +5860,7 @@ impl CodexAppServerState {
                 return Err(bridge_error(err));
             }
         };
+        let input = Self::attach_skill_mentions(app, &connection, &session_id, &cwd, &prompt, input);
         let takeover_turns = self.take_thread_ownership(app, &thread_id, &session_id);
         let mut turns_to_remember: Vec<String> = Vec::new();
         for turn_id in takeover_turns {
@@ -5889,21 +5976,17 @@ impl CodexAppServerState {
                 thread_id, model, effort
             ),
         );
-        let response = match connection.request_logged(
-            app,
-            &session_id,
-            "turn/start",
+        let response = match request_turn_start(app, &connection, &session_id, &input, |input| {
             build_turn_start_params(
                 &thread_id,
-                input.clone(),
+                input,
                 &model,
                 &effort,
                 &approval_policy,
                 &sandbox_mode,
                 fast_mode_for_turn(),
-            ),
-            TURN_START_TIMEOUT,
-        ) {
+            )
+        }) {
             Ok(response) => response,
             Err(err) => {
                 log_codex(app, &session_id, format!("turn/start failed: {err}"));
@@ -5950,10 +6033,7 @@ impl CodexAppServerState {
                                 format!("thread/resume ok; retrying turn/start thread={thread_id}"),
                             );
                             self.take_thread_ownership(app, &thread_id, &session_id);
-                            match connection.request_logged(
-                                app,
-                                &session_id,
-                                "turn/start",
+                            match request_turn_start(app, &connection, &session_id, &input, |input| {
                                 build_turn_start_params(
                                     &thread_id,
                                     input,
@@ -5962,9 +6042,8 @@ impl CodexAppServerState {
                                     &approval_policy,
                                     &sandbox_mode,
                                     fast_mode_for_turn(),
-                                ),
-                                TURN_START_TIMEOUT,
-                            ) {
+                                )
+                            }) {
                                 Ok(response) => response,
                                 Err(retry_err) => {
                                     log_codex(
@@ -6025,10 +6104,7 @@ impl CodexAppServerState {
                                         "retrying first turn on replacement thread={replacement_thread_id}"
                                     ),
                                 );
-                                match connection.request_logged(
-                                    app,
-                                    &session_id,
-                                    "turn/start",
+                                match request_turn_start(app, &connection, &session_id, &input, |input| {
                                     build_turn_start_params(
                                         &replacement_thread_id,
                                         input,
@@ -6037,9 +6113,8 @@ impl CodexAppServerState {
                                         &approval_policy,
                                         &sandbox_mode,
                                         fast_mode_for_turn(),
-                                    ),
-                                    TURN_START_TIMEOUT,
-                                ) {
+                                    )
+                                }) {
                                     Ok(response) => response,
                                     Err(retry_err) => {
                                         let message = format!(
@@ -6592,6 +6667,129 @@ impl CodexAppServerState {
             .expect("codex sessions lock")
             .get(session_id)
             .map(CodexSession::metadata)
+    }
+
+    /// Lists skills through the session's own app-server, so the account's CODEX_HOME applies.
+    /// Unknown or reloading sessions answer `ready: false` instead of spawning a runtime.
+    pub fn list_skills(
+        &self,
+        app: &HostContext,
+        request: &codex_skills_cmd::SkillsListRequest,
+    ) -> Result<Value, String> {
+        let session_id = request.session_id.as_str();
+        let session_cwd = self
+            .inner
+            .sessions
+            .lock()
+            .expect("codex sessions lock")
+            .get(session_id)
+            .map(|session| session.cwd.clone());
+        let Some(session_cwd) = session_cwd else {
+            return Ok(codex_skills_cmd::not_ready_skills_list());
+        };
+        if self.inner.reloading_sessions.lock().expect("codex reload lock").contains(session_id) {
+            return Ok(codex_skills_cmd::not_ready_skills_list());
+        }
+        let cwd = request.cwd.clone().unwrap_or(session_cwd);
+        let connection = self.ensure_session_connection(app, session_id)?;
+        let generation = connection.skills_cache_generation();
+        let response = connection.request_logged(
+            app,
+            session_id,
+            "skills/list",
+            codex_skills_cmd::skills_list_params(Some(&cwd), request.force_reload),
+            REQUEST_TIMEOUT,
+        )?;
+        let mut summary = codex_skills_cmd::summarize_skills_list_response(&response);
+        connection.store_skills(&cwd, generation, codex_skills_cmd::summary_skills(&summary));
+        summary["cwd"] = json!(cwd);
+        Ok(summary)
+    }
+
+    /// Appends `UserInput::Skill` items for mentioned skills; on any failure the
+    /// prompt still goes out as text, which Codex can resolve on its own.
+    fn attach_skill_mentions(
+        app: &HostContext,
+        connection: &CodexConnection,
+        session_id: &str,
+        cwd: &str,
+        prompt: &str,
+        input: Value,
+    ) -> Value {
+        if !codex_skills_cmd::prompt_may_mention_skill(prompt) {
+            return input;
+        }
+        let Some(skills) = Self::skills_for_mentions(app, connection, session_id, cwd) else {
+            return input;
+        };
+        let skill_items = codex_skills_cmd::skill_inputs_for_prompt(prompt, &skills);
+        if skill_items.is_empty() {
+            return input;
+        }
+        log_codex(
+            app,
+            session_id,
+            format!("send_message attached skill inputs count={}", skill_items.len()),
+        );
+        let Value::Array(mut items) = input else {
+            return input;
+        };
+        items.extend(skill_items);
+        Value::Array(items)
+    }
+
+    /// Runs under send_message's turn_operation_lock, so a cache miss costs at most
+    /// SKILL_MENTION_LOOKUP_TIMEOUT; the cache lock is never held across the request.
+    fn skills_for_mentions(
+        app: &HostContext,
+        connection: &CodexConnection,
+        session_id: &str,
+        cwd: &str,
+    ) -> Option<Vec<Value>> {
+        if let Some(skills) = connection.cached_skills(cwd) {
+            return Some(skills);
+        }
+        let generation = connection.skills_cache_generation();
+        match connection.request_logged(
+            app,
+            session_id,
+            "skills/list",
+            codex_skills_cmd::skills_list_params(Some(cwd), false),
+            SKILL_MENTION_LOOKUP_TIMEOUT,
+        ) {
+            Ok(response) => {
+                let summary = codex_skills_cmd::summarize_skills_list_response(&response);
+                let skills = codex_skills_cmd::summary_skills(&summary);
+                connection.store_skills(cwd, generation, skills.clone());
+                Some(skills)
+            }
+            Err(err) => {
+                log_codex(app, session_id, format!("skill mention lookup failed: {err}"));
+                None
+            }
+        }
+    }
+
+    /// handle_server_message drops notifications from any pid but the current
+    /// connection's, so the slot holds the connection that sent skills/changed.
+    fn handle_skills_changed(&self, app: &HostContext) {
+        let connection = self.connection_slot().lock().ok().and_then(|slot| slot.clone());
+        if let Some(connection) = connection {
+            connection.clear_skills_cache();
+        }
+        let session_ids: Vec<String> = self
+            .inner
+            .sessions
+            .lock()
+            .expect("codex sessions lock")
+            .keys()
+            .cloned()
+            .collect();
+        let owned: Vec<String> = session_ids
+            .into_iter()
+            .filter(|session_id| self.owns_session_runtime(session_id))
+            .collect();
+        publish_skills_changed(app, &owned);
     }
 
     pub fn get_context_usage(&self, session_id: &str) -> Option<Value> {
@@ -7166,6 +7364,10 @@ fn handle_notification(
         // broadcast/pull that remote clients consume, including clients paired
         // with a headless host.
         crate::claude_usage::publish_codex_usage_update(app, &params);
+        return;
+    }
+    if method == "skills/changed" {
+        state.handle_skills_changed(app);
         return;
     }
     let Some(session_id) = state.session_id_for_notification(&params) else {
@@ -8483,6 +8685,114 @@ mod tests {
         assert_eq!(session.sandbox_mode, "read-only");
         assert_eq!(session.approval_policy, "untrusted");
         assert_eq!(events.lock().unwrap().iter().filter(|(topic, _)| topic == "claude:history").count(), 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn list_skills_without_a_live_session_is_not_ready_and_spawns_nothing() {
+        let (app, _events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        let request = |session_id: &str| crate::commands::codex_skills::SkillsListRequest {
+            session_id: session_id.into(),
+            cwd: Some("/repo".into()),
+            force_reload: false,
+        };
+        let not_ready = json!({ "ready": false, "skills": [], "errors": [] });
+        assert_eq!(state.list_skills(&app, &request("missing")).unwrap(), not_ready);
+        state.inner.sessions.lock().unwrap().insert("session-1".into(), test_codex_session());
+        state.inner.reloading_sessions.lock().unwrap().insert("session-1".into());
+        assert_eq!(state.list_skills(&app, &request("session-1")).unwrap(), not_ready);
+        assert!(state.inner.connection.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn skills_changed_notification_invalidates_every_owned_session() {
+        let (app, events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        state.inner.sessions.lock().unwrap().insert("session-1".into(), test_codex_session());
+        state.inner.sessions.lock().unwrap().insert("session-2".into(), test_codex_session());
+        handle_notification(&app, &state, "skills/changed", json!({}));
+        let captured = events.lock().unwrap();
+        let mut invalidated: Vec<_> = captured
+            .iter()
+            .filter(|(topic, _)| topic == crate::commands::codex_skills::SKILLS_CHANGED_EVENT)
+            .map(|(_, payload)| payload["sessionId"].as_str().unwrap().to_string())
+            .collect();
+        invalidated.sort();
+        assert_eq!(invalidated, vec!["session-1", "session-2"]);
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn skills_changed_notification_clears_the_connection_skills_cache() {
+        let (app, _events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        let connection = test_connection("skills-cache-test", None);
+        let generation = connection.skills_cache_generation();
+        connection.store_skills("/repo", generation, vec![json!({ "name": "review" })]);
+        assert!(connection.cached_skills("/repo").is_some());
+        *state.inner.connection.lock().unwrap() = Some(connection.clone());
+        handle_notification(&app, &state, "skills/changed", json!({}));
+        assert!(connection.cached_skills("/repo").is_none());
+        // An answer requested before the notification must not repopulate the cache.
+        connection.store_skills("/repo", generation, vec![json!({ "name": "stale" })]);
+        assert!(connection.cached_skills("/repo").is_none());
+    }
+
+    #[test]
+    fn dropped_connection_skills_cache_is_cleared() {
+        let state = CodexAppServerState::default();
+        let connection = test_connection("skills-cache-test", None);
+        connection.store_skills("/repo", connection.skills_cache_generation(), Vec::new());
+        *state.inner.connection.lock().unwrap() = Some(connection.clone());
+        assert_eq!(state.take_connection_for_reap(), Some(connection.pid));
+        assert!(connection.cached_skills("/repo").is_none());
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn account_change_reset_invalidates_every_session_skills_menu() {
+        let (app, events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        state.inner.sessions.lock().unwrap().insert("session-1".into(), test_codex_session());
+        state.inner.sessions.lock().unwrap().insert("session-2".into(), test_codex_session());
+        state.reset_sessions_after_account_change(&app).unwrap();
+        let captured = events.lock().unwrap();
+        let mut invalidated: Vec<_> = captured
+            .iter()
+            .filter(|(topic, _)| topic == crate::commands::codex_skills::SKILLS_CHANGED_EVENT)
+            .map(|(_, payload)| payload["sessionId"].as_str().unwrap().to_string())
+            .collect();
+        invalidated.sort();
+        assert_eq!(invalidated, vec!["session-1", "session-2"]);
+    }
+
+    #[test]
+    fn turn_start_retries_without_skills_only_for_skill_rejections() {
+        let input = json!([
+            { "type": "text", "text": "$review this", "text_elements": [] },
+            { "type": "skill", "name": "review", "path": "/u/review/SKILL.md" },
+        ]);
+        let text_only = json!([{ "type": "text", "text": "$review this", "text_elements": [] }]);
+        let rejected: Result<Value, String> = Err(
+            "Invalid request: unknown variant `skill`, expected one of `text`, `image`, `localImage`".into(),
+        );
+        assert_eq!(turn_start_retry_without_skills(&rejected, &input), Some(text_only.clone()));
+        assert_eq!(
+            turn_start_retry_without_skills(&Err("Invalid params: missing field `path`".into()), &input),
+            Some(text_only.clone())
+        );
+        assert_eq!(turn_start_retry_without_skills(&Ok(json!({})), &input), None);
+        assert_eq!(
+            turn_start_retry_without_skills(&Err("codex app-server request timed out: turn/start".into()), &input),
+            None
+        );
+        assert_eq!(
+            turn_start_retry_without_skills(&Err("Invalid request: thread not found: thread-1".into()), &input),
+            None
+        );
+        assert_eq!(turn_start_retry_without_skills(&rejected, &text_only), None);
     }
 
     #[test]
@@ -10033,7 +10343,8 @@ invalid json
         let pid = child.id();
         Arc::new(CodexConnection { stdin: Mutex::new(stdin), child: Mutex::new(child), pid,
             pending: Arc::new(PendingTable::default()), next_id: AtomicU64::new(0),
-            auth_account_id: None, binary_identity: "reload-test".into() })
+            auth_account_id: None, binary_identity: "reload-test".into(),
+            skills_cache: Mutex::default() })
     }
 
     #[test]
@@ -10153,6 +10464,7 @@ invalid json
             pid,
             auth_account_id: auth_account_id.map(str::to_string),
             binary_identity: binary_identity.to_string(),
+            skills_cache: Mutex::default(),
         })
     }
 

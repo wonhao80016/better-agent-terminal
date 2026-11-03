@@ -565,6 +565,11 @@
   },
 
   "claude": {
+    "codexSkills": {
+      "commandsGroup": "BAT",
+      "skillsGroup": "Skills",
+      "loading": "正在載入 Codex skills…"
+    },
     "fastModeUnsupported": "此模型不支援 Fast 模式。",
     "fastModeBusy": "Fast 的變更將從下一回合開始生效。",
     "fastModeNextTurn": "下回合生效",

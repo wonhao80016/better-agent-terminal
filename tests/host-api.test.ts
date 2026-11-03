@@ -273,6 +273,9 @@ async function run() {
         return { items: [], fileCount: 0, totalBytes: 0, blockedCount: 0 } as unknown as T
       }
       if (cmd === 'session_history_trash') return { trashed: [], blocked: [], failed: [] } as unknown as T
+      if (cmd === 'codex_list_skills') {
+        return { ready: true, skills: [{ name: 'review', path: '/s/review/SKILL.md' }], errors: [] } as unknown as T
+      }
       if (cmd === 'remote_list_profiles') return { error: 'stub' } as unknown as T
       if (cmd === 'tunnel_get_connection') return { error: 'stub' } as unknown as T
       throw new Error(`unexpected invoke: ${cmd}`)
@@ -742,6 +745,15 @@ async function run() {
     )
     assert.deepEqual(await mod.host.sessionHistory.trash(trashRefs), { trashed: [], blocked: [], failed: [] })
 
+    // codex.listSkills — host-owned skill catalog for the Codex `/` menu.
+    const skills = await mod.host.codex.listSkills('s-1', '/repo')
+    assert.equal(skills.ready, true)
+    assert.equal(skills.skills.length, 1)
+    await mod.host.codex.listSkills('s-1', undefined, true)
+    const unsubSkills = mod.host.codex.onSkillsChanged(() => {})
+    assert.equal(typeof unsubSkills, 'function')
+    unsubSkills()
+
     const calledCommands = new Set(invokeCalls.map(call => call.cmd))
     for (const cmd of [
       'fs_resolve_path_links',
@@ -1007,6 +1019,8 @@ async function run() {
         cmd: 'session_history_trash',
         args: { sessions: [{ agent: 'claude', id: 'c-1' }, { agent: 'codex', id: 'x-1' }] },
       },
+      { cmd: 'codex_list_skills', args: { sessionId: 's-1', cwd: '/repo', forceReload: undefined } },
+      { cmd: 'codex_list_skills', args: { sessionId: 's-1', cwd: undefined, forceReload: true } },
     ])
   }
 

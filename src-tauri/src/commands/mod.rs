@@ -20,6 +20,7 @@ pub mod claude_channel;
 pub mod claude_cli;
 #[cfg(feature = "desktop")]
 pub mod clipboard;
+pub mod codex_skills;
 #[cfg(feature = "desktop")]
 pub mod debug;
 #[cfg(feature = "desktop")]

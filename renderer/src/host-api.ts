@@ -909,6 +909,20 @@ function createTauriHost(): BatAppAPI {
         getInvoke()<{ codexHome: string | null; providerConfigured: boolean; keyConfigured: boolean }>('codex_fugu_status'),
       fuguSetKey: (apiKey: string) =>
         getInvoke()<{ codexHome: string | null; providerConfigured: boolean; keyConfigured: boolean }>('codex_fugu_set_key', { apiKey }),
+      // Host-owned skill catalog from the session's app-server; `ready: false`
+      // means the host has no live Codex session to ask yet.
+      listSkills: (sessionId: string, cwd?: string, forceReload?: boolean) =>
+        getInvoke()<{ ready: boolean; skills: unknown[]; errors?: unknown[]; cwd?: string }>(
+          'codex_list_skills',
+          { sessionId, cwd, forceReload },
+        ),
+      onSkillsChanged: (cb: (sessionId: string) => void) =>
+        listenAdapter<{ sessionId?: string }>(
+          'claude:codex-skills-changed',
+          payload => {
+            if (typeof payload?.sessionId === 'string') cb(payload.sessionId)
+          },
+        ),
     },
     git: {
       // Read-only git wrappers — see src-tauri/src/commands/git.rs.

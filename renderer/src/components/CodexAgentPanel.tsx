@@ -42,6 +42,7 @@ import { formatErrorMessage } from '../utils/error-message'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
 import { BAT_FAST_SLASH_COMMAND, executeBatFastCommand, parseBatFastCommand } from '../utils/fast-mode-command'
 import { BAT_RELOAD_SLASH_COMMAND } from '../utils/session-reload'
+import { buildCodexSlashMenu, codexSkillLabel, codexSkillSummary, codexSkillsCache, codexSkillsCacheKey, flattenCodexSlashMenu, type CodexSlashMenuRow } from '../utils/codex-skills'
 import { useSessionReload } from '../hooks/useSessionReload'
 import { buildAskUserQnA, normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentAskUserQnA } from './AgentAskUserQnA'
@@ -609,6 +610,10 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const showSlashMenuRef = useRef(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
+  const selectedSlashItemRef = useRef<HTMLDivElement>(null)
+  const [codexSkillsVersion, setCodexSkillsVersion] = useState(0)
+  // One fetch attempt per menu opening, so a failing host is not re-asked on every render.
+  const codexSkillsAttemptRef = useRef<string | null>(null)
   // Ctrl+P file picker
   const [showFilePicker, setShowFilePicker] = useState(false)
   const [filePickerMode, setFilePickerMode] = useState<'preview' | 'attach'>('preview')
@@ -3269,10 +3274,36 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
 
   useEffect(() => { showSlashMenuRef.current = showSlashMenu }, [showSlashMenu])
 
+  const codexSkillsCwd = sessionMeta?.cwd || cwd
+  const codexSkillsKey = codexSkillsCacheKey(sessionId, codexSkillsCwd)
+
+  useEffect(() => {
+    if (!showSlashMenu) {
+      codexSkillsAttemptRef.current = null
+      return
+    }
+    if (codexSkillsCache.get(codexSkillsKey) || codexSkillsCache.isLoading(codexSkillsKey)) return
+    if (codexSkillsAttemptRef.current === codexSkillsKey) return
+    codexSkillsAttemptRef.current = codexSkillsKey
+    const tag = `[Codex:${sessionId.slice(0, 8)}]`
+    codexSkillsCache.load(codexSkillsKey, () => host.codex.listSkills(sessionId, codexSkillsCwd))
+      .catch(err => {
+        host.debug.log(`${tag} skills/list failed: ${formatErrorMessage(err, 'unknown error')}`)
+      })
+      .finally(() => setCodexSkillsVersion(v => v + 1))
+    setCodexSkillsVersion(v => v + 1)
+  }, [showSlashMenu, codexSkillsKey, codexSkillsCwd, sessionId, codexSkillsVersion])
+
+  useEffect(() => host.codex.onSkillsChanged(changedSessionId => {
+    if (changedSessionId !== sessionId) return
+    codexSkillsCache.invalidateSession(sessionId)
+    codexSkillsAttemptRef.current = null
+    setCodexSkillsVersion(v => v + 1)
+  }), [sessionId])
+
   // Filtered slash commands based on current input
-  const filteredSlashCommands = useMemo(() => {
+  const slashGroups = useMemo(() => {
     if (!showSlashMenu) return []
-    const q = slashFilter.toLowerCase()
     const builtIn: SlashCommandInfo[] = isCodexSession
       ? [
           { name: 'new', description: 'Reset session (clear conversation)', argumentHint: '' },
@@ -3303,9 +3334,32 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     if (allowFastMode && host.debug.isDebugMode === true && (isCodexSession || !isV2Session)) {
       builtIn.push(BAT_FAST_SLASH_COMMAND)
     }
-    const all = [...builtIn, ...slashCommands]
-    return q ? all.filter(c => c.name.toLowerCase().includes(q)) : all
-  }, [showSlashMenu, slashFilter, slashCommands, isCodexSession, isV2Session, allowFastMode])
+    return buildCodexSlashMenu({
+      commands: [...builtIn, ...slashCommands],
+      query: slashFilter,
+      skills: codexSkillsCache.get(codexSkillsKey) ?? [],
+      skillsLoading: codexSkillsCache.isLoading(codexSkillsKey),
+    })
+    // codexSkillsVersion re-reads the module-level cache after loads and invalidations.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSlashMenu, slashFilter, slashCommands, isCodexSession, isV2Session, allowFastMode, codexSkillsKey, codexSkillsVersion])
+
+  const filteredSlashCommands = useMemo(() => flattenCodexSlashMenu(slashGroups), [slashGroups])
+  const slashIndexByKey = useMemo(() => {
+    const map = new Map<string, number>()
+    filteredSlashCommands.forEach((row, i) => map.set(row.key, i))
+    return map
+  }, [filteredSlashCommands])
+
+  // Skills arrive after the menu opens and can shrink the list under the highlight.
+  useEffect(() => {
+    setSlashMenuIndex(prev => (prev < filteredSlashCommands.length ? prev : 0))
+  }, [filteredSlashCommands.length])
+
+  useEffect(() => {
+    if (!showSlashMenu) return
+    selectedSlashItemRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [showSlashMenu, slashMenuIndex])
 
   // Auto-resize textarea to fit content
   const autoResizeTextarea = useCallback(() => {
@@ -3329,8 +3383,13 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     }
   }, [])
 
-  const handleSlashSelect = useCallback((cmd: SlashCommandInfo) => {
-    setInputValue('/' + cmd.name + (cmd.name === 'bat-fast' ? ' ' : ''))
+  const handleSlashSelect = useCallback((row: CodexSlashMenuRow) => {
+    if (row.kind === 'skill') {
+      setInputValue(row.mentionText)
+    } else {
+      const cmd = row.command
+      setInputValue('/' + cmd.name + (cmd.name === 'bat-fast' ? ' ' : ''))
+    }
     setShowSlashMenu(false)
     textareaRef.current?.focus()
   }, [setInputValue])
@@ -5505,18 +5564,48 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           </div>
         )}
         {/* Slash command autocomplete menu */}
-        {showSlashMenu && filteredSlashCommands.length > 0 && (
+        {showSlashMenu && slashGroups.length > 0 && (
           <div className="claude-slash-menu">
-            {filteredSlashCommands.slice(0, 10).map((cmd, i) => (
-              <div
-                key={cmd.name}
-                className={`claude-slash-item${i === slashMenuIndex ? ' selected' : ''}`}
-                onClick={() => handleSlashSelect(cmd)}
-                onMouseEnter={() => setSlashMenuIndex(i)}
-              >
-                <span className="claude-slash-name">/{cmd.name}</span>
-                <span className="claude-slash-desc">{cmd.description}</span>
-              </div>
+            {slashGroups.map(group => (
+              <Fragment key={group.id}>
+                {slashGroups.length > 1 && (
+                  <div className="claude-slash-group">
+                    {group.id === 'skills' ? t('claude.codexSkills.skillsGroup') : t('claude.codexSkills.commandsGroup')}
+                  </div>
+                )}
+                {group.rows.map(row => {
+                  const i = slashIndexByKey.get(row.key) ?? -1
+                  const selected = i === slashMenuIndex
+                  return (
+                    <div
+                      key={row.key}
+                      ref={selected ? selectedSlashItemRef : undefined}
+                      className={`claude-slash-item${selected ? ' selected' : ''}`}
+                      onClick={() => handleSlashSelect(row)}
+                      onMouseEnter={() => setSlashMenuIndex(i)}
+                    >
+                      {row.kind === 'skill' ? (
+                        <>
+                          <span className="claude-slash-name" title={row.skill.path}>{codexSkillLabel(row.skill)}</span>
+                          <span className="claude-slash-hint">${row.skill.name}</span>
+                          {row.source && <span className="claude-slash-hint" title={row.skill.path}>{row.source}</span>}
+                          <span className="claude-slash-desc">{codexSkillSummary(row.skill)}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="claude-slash-name">/{row.command.name}</span>
+                          <span className="claude-slash-desc">{row.command.description}</span>
+                        </>
+                      )}
+                    </div>
+                  )
+                })}
+                {group.loading && (
+                  <div className="claude-slash-item">
+                    <span className="claude-slash-desc">{t('claude.codexSkills.loading')}</span>
+                  </div>
+                )}
+              </Fragment>
             ))}
           </div>
         )}

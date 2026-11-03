@@ -48,7 +48,8 @@ mod window_registry;
 #[cfg(feature = "desktop")]
 use commands::{
     agent as agent_cmd, app as app_cmd, claude as claude_cmd, claude_channel as claude_channel_cmd,
-    claude_cli as claude_cli_cmd, clipboard as clipboard_cmd, debug as debug_cmd,
+    claude_cli as claude_cli_cmd, clipboard as clipboard_cmd, codex_skills as codex_skills_cmd,
+    debug as debug_cmd,
     dialog as dialog_cmd, fs as fs_cmd, fugu as fugu_cmd, git as git_cmd, github as github_cmd,
     image as image_cmd, notification as notification_cmd, profile as profile_cmd, pty as pty_cmd,
     remote as remote_cmd, remote_tunnel as remote_tunnel_cmd, runtime as runtime_cmd,
@@ -415,6 +416,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             claude_cmd::codex_account_login_device_start,
             claude_cmd::codex_account_login_device_poll,
             claude_cmd::codex_account_login_device_cancel,
+            codex_skills_cmd::codex_list_skills,
             claude_cmd::claude_get_cli_path,
             claude_cmd::claude_prepare_cli_session,
             claude_cmd::claude_list_sessions,

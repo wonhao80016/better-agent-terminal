@@ -540,6 +540,11 @@
     "daysAgo": "{{count}} 天前"
   },
   "claude": {
+    "codexSkills": {
+      "commandsGroup": "BAT",
+      "skillsGroup": "Skills",
+      "loading": "正在加载 Codex skills…"
+    },
     "fastModeUnsupported": "此模型不支持 Fast 模式。",
     "fastModeBusy": "Fast 的更改将从下一回合开始生效。",
     "fastModeNextTurn": "下回合生效",

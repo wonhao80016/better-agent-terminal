@@ -444,6 +444,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "codex:account-switch" => Some(&["codexHome"]),
         "codex:auth-login-device-start" => Some(&[]),
         "codex:auth-login-device-poll" | "codex:auth-login-device-cancel" => Some(&["loginId"]),
+        "codex:skills-list" => Some(&["sessionId", "cwd", "forceReload"]),
         "claude:check-mcp-json-status" | "claude:enable-all-project-mcp" => Some(&["cwd"]),
         "worktree:create" => Some(&["sessionId", "cwd", "installPnpm"]),
         "worktree:remove" => Some(&["sessionId", "deleteBranch"]),
@@ -665,7 +666,7 @@ pub fn event_params_to_legacy_v1_args(channel: &str, params: &Value) -> Vec<Valu
         "pty:output" => vec![params["id"].clone(), params["data"].clone()],
         "pty:exit" => vec![params["id"].clone(), params["exitCode"].clone()],
         "pty:viewport-state" => vec![params["id"].clone(), params["state"].clone()],
-        "claude:session-reset" => vec![params["sessionId"].clone()],
+        "claude:session-reset" | "claude:codex-skills-changed" => vec![params["sessionId"].clone()],
         "claude:message" => vec![params["sessionId"].clone(), params["message"].clone()],
         "claude:tool-use" => vec![params["sessionId"].clone(), params["toolCall"].clone()],
         "claude:tool-result" => vec![params["sessionId"].clone(), params["result"].clone()],
@@ -729,7 +730,7 @@ pub fn legacy_v1_event_args_to_params(channel: &str, args: &[Value]) -> Value {
             "id": args.first().cloned().unwrap_or(Value::Null),
             "state": args.get(1).cloned().unwrap_or(Value::Null),
         }),
-        "claude:session-reset" => json!({
+        "claude:session-reset" | "claude:codex-skills-changed" => json!({
             "sessionId": args.first().cloned().unwrap_or(Value::Null),
         }),
         "claude:message" => claude_event_params(args, "message"),
@@ -794,6 +795,9 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             // The CLI's own slash-command / skill list. A remote client builds the
             // same menu from it, so it has to cross the boundary too.
             | "claude:commands"
+            // Codex skills/changed, fanned out per owned session so the client
+            // refetches the host's catalog instead of keeping a stale menu.
+            | "claude:codex-skills-changed"
             | "claude:permission-request"
             | "claude:permission-resolved"
             | "claude:ask-user"
@@ -904,6 +908,35 @@ mod tests {
             "claude:account-changed"
         );
         assert!(is_proxied_remote_event("agent:account-changed"));
+    }
+
+    #[test]
+    fn codex_skills_channels_map_params_and_reach_remote_clients() {
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "codex:skills-list",
+                &[json!("s-1"), json!("/repo"), json!(true)]
+            ),
+            json!({ "sessionId": "s-1", "cwd": "/repo", "forceReload": true })
+        );
+        let params = json!({ "sessionId": "s-1", "cwd": null, "forceReload": false });
+        assert_eq!(
+            legacy_v1_args_to_params("codex:skills-list", &[params.clone()]),
+            params
+        );
+        assert!(is_proxied_remote_event("claude:codex-skills-changed"));
+        assert!(is_proxied_remote_event("agent:codex-skills-changed"));
+        assert_eq!(
+            event_params_to_legacy_v1_args(
+                "claude:codex-skills-changed",
+                &json!({ "sessionId": "s-1" })
+            ),
+            vec![json!("s-1")]
+        );
+        assert_eq!(
+            legacy_v1_event_args_to_params("claude:codex-skills-changed", &[json!("s-1")]),
+            json!({ "sessionId": "s-1" })
+        );
     }
 
     // A hydrated profile index as the host holds it: `remoteToken` is the live
