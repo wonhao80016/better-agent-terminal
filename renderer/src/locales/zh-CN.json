@@ -247,7 +247,8 @@
     "runningCount": "{{count}} 个运行中",
     "otherWindow": "{{name}} 窗口",
     "sectionNeedsYou": "需要你",
-    "sectionRunning": "运行中"
+    "sectionRunning": "运行中",
+    "backgroundTasksTooltip": "后台运行中 {{count}} 个 agent"
   },
   "sidebar": {
     "workspaces": "工作区",
@@ -648,6 +649,8 @@
     "agentsRunning": "{{count}} 运行中",
     "agentsDone": "{{count}} 已完成",
     "agentsFailed": "{{count}} 失败",
+    "backgroundTasksTitle": "后台任务",
+    "backgroundRunning": "后台运行中 {{count}}",
     "messages": "{{count}} 条消息",
     "subagentTranscript": "执行记录",
     "subagentNoTranscript": "未记录此代理的执行记录",

@@ -53,6 +53,32 @@
   opacity: 1;
 }
 
+/* Background tasks still running after the main turn ended: slow blue pulse. */
+.activity-indicator.background {
+  background-color: #3b82f6;
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.7);
+  overflow: visible;
+  will-change: opacity;
+  animation: breathe-background 3s ease-in-out infinite alternate;
+}
+
+.activity-indicator.has-bg-count {
+  overflow: visible;
+  margin-right: 10px;
+}
+
+.activity-indicator-bg-count {
+  position: absolute;
+  left: calc(100% + 2px);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 9px;
+  font-weight: 700;
+  color: #60a5fa;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .activity-indicator.pending {
   background-color: #ef4444;
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
@@ -93,6 +119,22 @@
   to {
     opacity: 1;
     transform: scale(1.05);
+  }
+}
+
+@keyframes breathe-background {
+  from {
+    opacity: 0.45;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-indicator.background {
+    animation: none;
   }
 }
 

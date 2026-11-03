@@ -611,7 +611,7 @@ async function run() {
     // unsubscriber.
     for (const name of [
       'onHistory', 'onResumeLoading', 'onSessionReset',
-      'onRateLimit', 'onWorktreeInfo', 'onPromptSuggestion',
+      'onRateLimit', 'onWorktreeInfo', 'onPromptSuggestion', 'onBackgroundTasks',
     ] as const) {
       const unsub = (mod.host.claude as Record<string, (cb: unknown) => unknown>)[name](() => {})
       assert.equal(typeof unsub, 'function', `${name} should return an unsubscriber`)
@@ -620,6 +620,10 @@ async function run() {
     assert.deepEqual(
       mod.resolveClaudeEventSecondArg('onHistory', { sessionId: 's-1', items: ['claude'] }),
       ['claude'],
+    )
+    assert.deepEqual(
+      mod.resolveClaudeEventSecondArg('onBackgroundTasks', { sessionId: 's-1', tasks: [{ id: 't-1' }] }),
+      [{ id: 't-1' }],
     )
     assert.deepEqual(
       mod.resolveClaudeEventSecondArg('onHistory', { sessionId: 's-1', payload: ['codex'] }),

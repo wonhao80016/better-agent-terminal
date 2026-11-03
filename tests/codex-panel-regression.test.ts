@@ -492,7 +492,7 @@ async function main() {
     // them are replayed — so reconnecting has to ask what is still outstanding.
     assert.match(
       panelSource,
-      /host\.claude\.getSessionState\(sessionId\)\s*\n\s*\.then\(state => adoptHostPendingPrompts/,
+      /host\.claude\.getSessionState\(sessionId\)\s*\n\s*\.then\(state => \{?\s*adoptHostPendingPrompts/,
       `${panel} should re-check pending prompts after a remote reconnect`,
     )
   }

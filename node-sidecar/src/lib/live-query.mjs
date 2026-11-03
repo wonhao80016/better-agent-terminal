@@ -18,7 +18,7 @@
 // result deferreds) is locked before we change the production path.
 //
 // API summary:
-//   const lq = new LiveQuery({ sdk, queryOptions, onMessage, onError })
+//   const lq = new LiveQuery({ sdk, queryOptions, onMessage, onError, onClose })
 //   const result = await lq.push(userMessage)   // resolves on next 'result' frame
 //   await lq.stopTask(taskId)
 //   await lq.interrupt()
@@ -40,7 +40,7 @@
 const TURN_END_TYPES = new Set(['result'])
 
 export class LiveQuery {
-  constructor({ sdk, queryOptions, onMessage, onError } = {}) {
+  constructor({ sdk, queryOptions, onMessage, onError, onClose } = {}) {
     if (!sdk || typeof sdk.query !== 'function') {
       throw new Error('LiveQuery: sdk.query is required')
     }
@@ -53,6 +53,7 @@ export class LiveQuery {
     this._turnDeferreds = []  // FIFO {resolve, reject} per push()
     this._onMessage = onMessage
     this._onError = typeof onError === 'function' ? onError : () => {}
+    this._onClose = typeof onClose === 'function' ? onClose : () => {}
 
     const self = this
     const promptIterable = {
@@ -103,6 +104,7 @@ export class LiveQuery {
       const closedErr = new Error('LiveQuery closed before turn completed')
       for (const d of this._turnDeferreds) d.reject(closedErr)
       this._turnDeferreds.length = 0
+      try { this._onClose() } catch (err) { this._onError(err) }
     }
   }
 

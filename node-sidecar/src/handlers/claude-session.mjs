@@ -20,6 +20,7 @@ import {
 import { normalizeClaudeEffortMode, isUltracodeMode, runtimeEffortForMode } from '../lib/claude-effort.mjs'
 import { autoCompactWindowForClaudeSelection, expectedContextWindowForModel, sdkModelForClaudeSelection } from '../lib/models.mjs'
 import { closeLiveQuery, reloadClaudeSession } from './claude-send.mjs'
+import { backgroundTaskList } from '../lib/background-tasks.mjs'
 import { readFastModePolicy, supportsClaudeFastMode, refreshFastMode, effectiveFastMode, isFastModeDebugEnabled } from '../lib/fast-mode.mjs'
 
 function applyEffortOptions(session, options) {
@@ -181,7 +182,7 @@ async function resumeClaudeSession(params, opts = {}) {
   // Tear down any persistent SDK subprocess before swapping the record.
   // The new session's first sendMessage will rebuild a LiveQuery with
   // the freshly stashed sdkSessionId so the SDK rehydrates context.
-  closeLiveQuery(existing)
+  closeLiveQuery(existing, { userAbort: true })
   // Drop the prior record (if any) and rebuild from the resume options.
   sessions.delete(sessionId)
   const s = ensureSession(sessionId)
@@ -314,7 +315,7 @@ registerHandler('claude.restSession', async (params) => {
   }
   // Resting kills the persistent SDK subprocess so the user pays no
   // CPU/tokens while paused. wake / next sendMessage will rebuild.
-  closeLiveQuery(session)
+  closeLiveQuery(session, { userAbort: true })
   session.streaming = false
   clearSessionStream(session)
   session.isResting = true
@@ -359,7 +360,7 @@ registerHandler('claude.stopSession', async (params) => {
   if (s?.abortController) {
     try { s.abortController.abort() } catch { /* already aborted */ }
   }
-  closeLiveQuery(s)
+  closeLiveQuery(s, { userAbort: true })
   const existed = sessions.delete(sessionId)
   return { ok: true, existed }
 })
@@ -382,7 +383,7 @@ registerHandler('claude.abortSession', async (params) => {
     // explicitly to wake any pending push() promise straight away
     // (otherwise renderer's spinner waits for the SDK throw to
     // propagate through the iterator).
-    closeLiveQuery(session)
+    closeLiveQuery(session, { userAbort: true })
     session.active = false
     session.streaming = false
     clearSessionStream(session)
@@ -606,7 +607,7 @@ registerHandler('claude.resetSession', async (params) => {
   if (prior?.abortController) {
     try { prior.abortController.abort() } catch { /* already aborted */ }
   }
-  closeLiveQuery(prior)
+  closeLiveQuery(prior, { userAbort: true })
   // Drop the session record entirely. Next startSession recreates it.
   // sdkSessionId is not persisted in sessionConfigs (see state.mjs CONFIG_KEYS),
   // so the rebuilt session starts a fresh SDK conversation; the renderer's
@@ -660,6 +661,8 @@ registerHandler('claude.getSessionState', async (params) => {
     // first: the agent is blocked on the first one it asked.
     pendingAskUser: firstPendingData(s.pendingAskUser),
     pendingPermission: firstPendingData(s.pendingPermissions),
+    // claude:background-tasks is edge-triggered; late subscribers read the list here.
+    backgroundTasks: backgroundTaskList(s),
   }
 })
 

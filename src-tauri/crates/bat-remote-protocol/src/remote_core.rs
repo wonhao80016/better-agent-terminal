@@ -704,6 +704,8 @@ pub fn event_params_to_legacy_v1_args(channel: &str, params: &Value) -> Vec<Valu
         }
         "claude:worktree-info" => vec![params["sessionId"].clone(), params["payload"].clone()],
         "claude:rate-limit" => vec![params["sessionId"].clone(), params["info"].clone()],
+        "claude:task" => vec![params["sessionId"].clone(), params["task"].clone()],
+        "claude:background-tasks" => vec![params["sessionId"].clone(), params["tasks"].clone()],
         "fs:changed"
         | "profile:changed"
         | "workspace:detached"
@@ -752,6 +754,8 @@ pub fn legacy_v1_event_args_to_params(channel: &str, args: &[Value]) -> Value {
         "claude:prompt-suggestion" => claude_event_params(args, "suggestion"),
         "claude:worktree-info" => claude_event_params(args, "payload"),
         "claude:rate-limit" => claude_event_params(args, "info"),
+        "claude:task" => claude_event_params(args, "task"),
+        "claude:background-tasks" => claude_event_params(args, "tasks"),
         "fs:changed"
         | "profile:changed"
         | "workspace:detached"
@@ -809,6 +813,10 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             | "claude:session-reset"
             | "claude:worktree-info"
             | "claude:rate-limit"
+            // Host-owned task state: lifecycle edges and the live background
+            // list drive the remote panel's task bar and activity indicator.
+            | "claude:task"
+            | "claude:background-tasks"
             // Host-owned account state. Carries no sessionId, so
             // event_owner_key_for_event yields None and it fans out to every
             // window on the client rather than one session's owner.
@@ -893,6 +901,21 @@ mod tests {
             ),
             json!({ "tool": "claude", "ok": true })
         );
+    }
+
+    #[test]
+    fn task_state_reaches_remote_clients_in_both_protocols() {
+        for channel in ["claude:task", "claude:background-tasks", "agent:background-tasks"] {
+            assert!(is_proxied_remote_event(channel), "{channel} must be proxied");
+        }
+        assert!(!is_proxied_remote_event("claude:background-settled"));
+        let params = json!({ "sessionId": "s-1", "tasks": [{ "id": "t-1" }] });
+        let args = event_params_to_legacy_v1_args("claude:background-tasks", &params);
+        assert_eq!(args, vec![json!("s-1"), json!([{ "id": "t-1" }])]);
+        assert_eq!(legacy_v1_event_args_to_params("claude:background-tasks", &args), params);
+        let task = json!({ "sessionId": "s-1", "task": { "id": "t-1", "status": "running" } });
+        let task_args = event_params_to_legacy_v1_args("claude:task", &task);
+        assert_eq!(legacy_v1_event_args_to_params("claude:task", &task_args), task);
     }
 
     #[test]

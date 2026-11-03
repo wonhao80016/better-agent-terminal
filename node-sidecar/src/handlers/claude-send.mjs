@@ -11,8 +11,11 @@
 //   stream_event     → claude:stream (text/thinking deltas) + usage tracking
 //   assistant        → claude:message + claude:tool-use per block
 //   user             → claude:tool-result per tool_result block
-//   result/success   → claude:result + claude:turn-end
+//   result/success   → claude:result + claude:turn-end (with pendingBackground, workId)
 //   result/!success  → claude:error + claude:turn-end
+//   system/task_*    → claude:task
+//   system/background_tasks_changed → claude:background-tasks
+//   system/session_state_changed    → claude:background-settled (held completion)
 //   stream throw     → handled by sendMessage's catch → claude:error /
 //                      claude:turn-end
 //
@@ -57,6 +60,23 @@ import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
 import { buildCanUseTool } from './claude-permission.mjs'
 import { invalidateSessionCommandCache } from './claude-readonly.mjs'
 import { LiveQuery } from '../lib/live-query.mjs'
+import {
+  applyBackgroundLevel,
+  backgroundTaskCount,
+  backgroundTaskList,
+  isKnownBackgroundTask,
+  noteBackgroundLaunch,
+  noteMainThreadActivity,
+  noteSessionState,
+  noteTaskNotification,
+  noteTaskStarted,
+  noteTaskUpdated,
+  noteTurnEndedWithoutResult,
+  noteTurnResult,
+  noteUserTurn,
+  resetBackgroundTasks,
+  syncBackgroundTasks,
+} from '../lib/background-tasks.mjs'
 import { isCodexSession, sendCodexMessage, isCodexAgentPreset } from './codex.mjs'
 
 let userEchoSeq = 0
@@ -592,6 +612,9 @@ function processMessage(s, sessionId, msg) {
     if (!msg.parent_tool_use_id && s.streaming && msg.status === 'compacting') {
       setRuntimeStatus(s, sessionId, 'compacting', 'Compacting context; still waiting for Claude API response.')
     }
+    // 'requesting' precedes a turn's first token, so a turn the SDK opens for
+    // a finished background task is seen before its time to first token.
+    if (msg.status === 'requesting') noteMainThreadActivity(s, msg)
     if (msg.compact_result === 'failed') {
       logWarn(`claude.compact(${shortSessionId(sessionId)}): compaction failed${msg.compact_error ? `: ${msg.compact_error}` : ''}`)
     }
@@ -608,6 +631,24 @@ function processMessage(s, sessionId, msg) {
   }
   if (t === 'system' && (msg.subtype === 'task_started' || msg.subtype === 'task_updated')) {
     handleTaskMessage(s, sessionId, msg)
+    return
+  }
+  if (t === 'system' && msg.subtype === 'task_notification') {
+    handleTaskNotification(s, sessionId, msg)
+    return
+  }
+  if (t === 'system' && msg.subtype === 'background_tasks_changed') {
+    applyBackgroundLevel(s, sessionId, msg)
+    debugLog('emit-background-tasks', sessionId, { count: backgroundTaskCount(s) })
+    return
+  }
+  if (t === 'system' && msg.subtype === 'session_state_changed') {
+    debugLog('session-state', sessionId, { state: msg.state })
+    noteSessionState(s, sessionId, msg.state)
+    return
+  }
+  if (t === 'system' && msg.subtype === 'thinking_tokens') {
+    noteMainThreadActivity(s, msg)
     return
   }
   if (t === 'rate_limit_event') {
@@ -631,6 +672,7 @@ function processMessage(s, sessionId, msg) {
     return
   }
   if (t === 'stream_event') {
+    noteMainThreadActivity(s, msg)
     const ev = msg.event
     // Record usage before markRuntimeResponded so the status event it emits
     // already carries this request's context footprint.
@@ -678,6 +720,7 @@ function processMessage(s, sessionId, msg) {
     return
   }
   if (t === 'assistant') {
+    noteMainThreadActivity(s, msg)
     // The assistant frame carries the completed request's usage. Streaming
     // builds already recorded it from message_start; capture it here too so
     // ctx% still tracks the context window when partial messages are off.
@@ -754,6 +797,7 @@ function processMessage(s, sessionId, msg) {
     return
   }
   if (t === 'user') {
+    if (msg.isReplay !== true) noteMainThreadActivity(s, msg)
     markRuntimeResponded(s, sessionId)
     const blocks = msg.message?.content
     if (Array.isArray(blocks)) {
@@ -776,6 +820,7 @@ function processMessage(s, sessionId, msg) {
               result: block.content,
             },
           })
+          if (!block.is_error) noteBackgroundLaunch(s, sessionId, findSessionToolCall(s, block.tool_use_id))
         }
       }
     }
@@ -812,6 +857,8 @@ function processMessage(s, sessionId, msg) {
     // anything below can return early on an interrupt or error, so the next
     // turn cannot inherit these counts.
     resetTurnRequestTracking(s)
+    const outcome = s.interruptRequested ? 'interrupted' : msg.subtype === 'success' ? 'completed' : 'error'
+    const held = noteTurnResult(s, sessionId, { outcome, result: msg.result })
     if (s.interruptRequested) {
       // Turn-only interrupt (1× Esc): the SDK ended this turn but the
       // subprocess + any background workflow stay alive. Report it as an
@@ -859,8 +906,21 @@ function processMessage(s, sessionId, msg) {
           if (task.isBackground !== true) s.activeTasks.delete(taskId)
         }
       }
-      debugLog('emit-turn-end', sessionId, { reason: 'completed' })
-      sendEvent('claude:turn-end', { sessionId, payload: { reason: 'completed', result: msg.result, sdkSessionId: msg.session_id } })
+      debugLog('emit-turn-end', sessionId, { reason: 'completed', ...held })
+      // pendingBackground > 0 or awaitingIdle holds the host's completion
+      // notification until claude:background-settled or a later turn-end;
+      // workId lets the host notify each unit of work once.
+      sendEvent('claude:turn-end', {
+        sessionId,
+        payload: {
+          reason: 'completed',
+          result: msg.result,
+          sdkSessionId: msg.session_id,
+          pendingBackground: held.pendingBackground,
+          workId: held.workId,
+          ...(held.awaitingIdle ? { awaitingIdle: true } : {}),
+        },
+      })
     } else {
       clearSessionStream(s)
       const errMsg = resultErrorMessage(msg)
@@ -909,7 +969,9 @@ function handleTaskMessage(s, sessionId, msg) {
       status: 'running',
       startedAt: Date.now(),
     }
+    if (msg.is_backgrounded === true) task.isBackground = true
     if (msg.skip_transcript === true) task.skipTranscript = true
+    if (msg.ambient === true) task.ambient = true
     s.activeTasks.set(taskId, task)
   } else {
     // task_updated: merge the wire-safe patch into the tracked task.
@@ -932,6 +994,7 @@ function handleTaskMessage(s, sessionId, msg) {
       // the renderer treats it as "not an agent" and would start trusting a
       // task that lost the flag (GH #127).
       ...(msg.skip_transcript === true || prev?.skipTranscript === true ? { skipTranscript: true } : {}),
+      ...(prev?.ambient === true ? { ambient: true } : {}),
     }
     if (TERMINAL_TASK_STATUSES.has(task.status)) {
       s.activeTasks.delete(taskId)
@@ -941,6 +1004,41 @@ function handleTaskMessage(s, sessionId, msg) {
   }
   debugLog('emit-task', sessionId, { id: taskId, subtype: msg.subtype, status: task.status, isWorkflow: task.isWorkflow, toolUseId: task.toolUseId })
   sendEvent('claude:task', { sessionId, task })
+  if (msg.subtype === 'task_started') noteTaskStarted(s, sessionId, msg)
+  else noteTaskUpdated(s, sessionId, task, msg.patch)
+}
+
+// task_notification is the SDK's terminal bookend for a task (including the
+// 'stopped' outcome of stopTask). Only background tasks end here; a foreground
+// task ends with its tool_result and the turn-end cleanup.
+function handleTaskNotification(s, sessionId, msg) {
+  const taskId = typeof msg.task_id === 'string' ? msg.task_id : null
+  const prev = taskId ? s.activeTasks?.get(taskId) : null
+  const toolUseId = typeof msg.tool_use_id === 'string' ? msg.tool_use_id : prev?.toolUseId ?? null
+  if (prev && (prev.isBackground === true || isKnownBackgroundTask(s, taskId, toolUseId))) {
+    s.activeTasks.delete(taskId)
+    const status = msg.status === 'completed' || msg.status === 'failed' ? msg.status : 'killed'
+    const task = { ...prev, status }
+    debugLog('emit-task', sessionId, { id: taskId, subtype: msg.subtype, status, toolUseId: task.toolUseId })
+    sendEvent('claude:task', { sessionId, task })
+  }
+  noteTaskNotification(s, sessionId, msg, prev?.toolUseId ?? null)
+}
+
+function findSessionToolCall(s, toolUseId) {
+  const messages = Array.isArray(s.messages) ? s.messages : []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const item = messages[i]
+    if (item && item.id === toolUseId && typeof item.toolName === 'string') return item
+  }
+  return null
+}
+
+function sessionIdOf(s) {
+  for (const [id, session] of sessions) {
+    if (session === s) return id
+  }
+  return null
 }
 
 function snapshotFastMode(s) {
@@ -1005,8 +1103,12 @@ async function buildQueryOptions(s, sessionId, prompt, fastModeSnapshot) {
   const installedPlugins = await loadInstalledPlugins()
   if (installedPlugins.length > 0) queryOptions.plugins = installedPlugins
   queryOptions.canUseTool = (toolName, input, opts) => buildCanUseTool(s, sessionId, toolName, input, opts)
-  if (s.autoCompactWindow) {
-    queryOptions.env = { ...process.env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(s.autoCompactWindow) }
+  // The CLI forwards session_state_changed to SDK consumers only with this
+  // flag; its 'idle' is the one signal that background agents are done too.
+  queryOptions.env = {
+    ...process.env,
+    CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
+    ...(s.autoCompactWindow ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(s.autoCompactWindow) } : {}),
   }
   if (s.sdkSessionId) {
     queryOptions.resume = s.sdkSessionId
@@ -1073,6 +1175,7 @@ async function ensureLiveQuery(s, sessionId, sdk, prompt, isCurrent, fastModeSna
     hasClaudePath: typeof queryOptions.pathToClaudeCodeExecutable === 'string',
     pluginCount: Array.isArray(queryOptions.plugins) ? queryOptions.plugins.length : 0,
   })
+  syncBackgroundTasks(s, sessionId)
   live = new LiveQuery({
     sdk,
     queryOptions,
@@ -1089,6 +1192,12 @@ async function ensureLiveQuery(s, sessionId, sdk, prompt, isCurrent, fastModeSna
     onError: (err) => {
       logWarn(`LiveQuery stream error for ${sessionId}: ${err?.message || err}`)
     },
+    // closeLiveQuery detaches s.liveQuery first and resets the tracker itself,
+    // so only a process that exited on its own gets here.
+    onClose: () => {
+      if (sessions.get(sessionId) !== s || s.liveQuery !== live) return
+      resetBackgroundTasks(s, sessionId, { announceHeld: true })
+    },
   })
   s.liveQuery = live
   s.liveQueryFastMode = queryOptions.settings.fastMode
@@ -1099,26 +1208,23 @@ async function ensureLiveQuery(s, sessionId, sdk, prompt, isCurrent, fastModeSna
   return live
 }
 
-// closeLiveQuery: shared cleanup used by the lifecycle handlers in
-// claude-session.mjs (abort / reset / stop / rest / resume) and also
-// invoked locally when a control method fails. Idempotent.
-//
-// abortController is intentionally NOT cleared — sendMessage's catch
-// reads s.abortController?.signal.aborted to distinguish 'aborted' vs
-// 'error' turn-end reasons after a push() rejects. ensureLiveQuery
-// installs a fresh AbortController on the next rebuild.
-export function closeLiveQuery(s) {
+// Idempotent. abortController stays set because sendMessage's catch reads it to tell
+// 'aborted' from 'error' after push() rejects. userAbort means the user ended the work,
+// so a completion held for background agents is dropped instead of announced.
+export function closeLiveQuery(s, { userAbort = false } = {}) {
   if (!s) return
-  if (s.liveQuery) {
-    try { s.liveQuery.close() } catch { /* ignore */ }
-  }
+  const live = s.liveQuery
   s.liveQuery = null
+  if (live) {
+    try { live.close() } catch { /* ignore */ }
+  }
   s.currentQuery = null
   s.interruptRequested = false
   // The subprocess is gone, so any background workflows / subagents it was
   // running are gone too. Drop the tracked tasks; the renderer clears its
   // mirror on the 'aborted' / 'error' turn-end that accompanies this.
   if (s.activeTasks) s.activeTasks.clear()
+  resetBackgroundTasks(s, sessionIdOf(s), { announceHeld: !userAbort })
 }
 
 // Rebuild the SDK subprocess without sending a user prompt or replacing the
@@ -1144,7 +1250,7 @@ export async function reloadClaudeSession(sessionId) {
   let timer
   try {
     s.abortController?.abort()
-    closeLiveQuery(s)
+    closeLiveQuery(s, { userAbort: true })
     for (const [toolUseId, pending] of s.pendingPermissions || []) {
       try { pending.resolve({ behavior: 'deny', message: 'Agent restarted by the user' }) } catch { /* cancelled callback */ }
       sendEvent('claude:permission-resolved', { sessionId, toolUseId })
@@ -1301,6 +1407,7 @@ async function performSendMessage(params, onAccepted) {
     // request deadline looked like a lost send, and a remote client's message
     // stayed ghosted for the whole turn. A push into an already-closed query
     // enqueues nothing, so that one is left for the caller to see as an error.
+    noteUserTurn(s, sessionId)
     const pushed = live.push(userMessage)
     if (!live.isClosed) onAccepted?.()
     const result = await pushed
@@ -1344,6 +1451,7 @@ async function performSendMessage(params, onAccepted) {
       s.interruptRequested = false
       clearRuntimeStatus(s, sessionId)
       logInfo(`claude.sendMessage(${sid}): interrupted (turn-only, via throw)`)
+      noteTurnEndedWithoutResult(s, sessionId, 'interrupted')
       sendEvent('claude:turn-end', { sessionId, payload: { reason: 'interrupted' } })
       return { ok: true, interrupted: true }
     }
@@ -1358,6 +1466,7 @@ async function performSendMessage(params, onAccepted) {
     } else {
       logInfo(`claude.sendMessage(${sid}): aborted`)
     }
+    noteTurnEndedWithoutResult(s, sessionId, aborted ? 'aborted' : 'error')
     sendEvent('claude:turn-end', { sessionId, payload: { reason: aborted ? 'aborted' : 'error' } })
     if (live.isClosed && s.liveQuery === live) {
       s.liveQuery = null
@@ -1541,7 +1650,9 @@ registerHandler('claude.stopTask', async (params) => {
   }
   const s = sessions.get(sessionId)
   const query = s?.currentQuery
-  if (!s || !s.streaming || !query || typeof query.stopTask !== 'function') {
+  // Background tasks outlive the turn, so they stay stoppable while idle.
+  const stoppable = s?.streaming || backgroundTaskCount(s) > 0 || (s?.activeTasks?.size ?? 0) > 0
+  if (!s || !stoppable || !query || typeof query.stopTask !== 'function') {
     return { ok: false, error: 'no active query for session' }
   }
   // The renderer often only knows the tool_use id; the SDK's stopTask wants
@@ -1551,6 +1662,11 @@ registerHandler('claude.stopTask', async (params) => {
   if (s.activeTasks && !s.activeTasks.has(taskId)) {
     for (const tracked of s.activeTasks.values()) {
       if (tracked.toolUseId === taskId) { targetId = tracked.id; break }
+    }
+  }
+  if (targetId === taskId) {
+    for (const entry of backgroundTaskList(s)) {
+      if (entry.toolUseId === taskId && entry.id !== taskId) { targetId = entry.id; break }
     }
   }
   try {

@@ -9,11 +9,11 @@ import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { ClaudeMessage, ClaudeSessionState, ClaudeToolCall } from '../types/claude-agent'
 import { isToolCall, normalizeMessageItem, normalizeMessageItems } from '../types/claude-agent'
-import type { CodexApprovalPolicy, CodexSandboxMode } from '../types'
+import type { BackgroundTaskInfo, CodexApprovalPolicy, CodexSandboxMode } from '../types'
 import { CLAUDE_EFFORT_MODES, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, EFFORT_LEVELS, effortLevelForClaudeMode, isUltracodeEffortMode } from '../types'
 import { normalizeAgentParams } from '../types/agent-profiles'
 import { settingsStore, useSettings } from '../stores/settings-store'
-import { workspaceStore } from '../stores/workspace-store'
+import { useWorkspace, workspaceStore } from '../stores/workspace-store'
 import { shallowEqual } from '../stores/use-store'
 import { getAgentPreset, type AgentPresetId } from '../types/agent-presets'
 import { LinkedText, FilePreviewModal } from './PathLinker'
@@ -55,7 +55,8 @@ import { AgentToolRow } from './AgentToolRow'
 import { buildAskUserQnA, formatAskUserPrompt, normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentAskUserQnA } from './AgentAskUserQnA'
 import { AgentActivityTree } from './AgentActivityTree'
-import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
+import { backgroundTasksOutsideTree, buildAgentTaskTree, countForegroundRunning, findAgentNode, formatAgentNodeElapsed, liveBackgroundIds, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
+import { normalizeBackgroundTasks } from '../lib/background-activity'
 import { bindPanelActiveEvent, usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
 import { buildTranscriptHandoffPrompt, codexPermissionsForClaudeHandoff, type TranscriptSnapshot } from '../utils/agent-context-transfer'
@@ -104,6 +105,14 @@ interface ModelInfo {
 
 const getAutoCompactWindowForModel = (model: string | undefined, fallback?: number | null): number | null =>
   autoCompactWindowForClaudeSelection(model, fallback)
+
+const NO_BACKGROUND_TASKS: readonly BackgroundTaskInfo[] = []
+
+// Hosts that predate background tracking omit the field; keep the current list then.
+function adoptHostBackgroundTasks(sessionId: string, state: unknown): void {
+  const tasks = (state as { backgroundTasks?: unknown } | null)?.backgroundTasks
+  if (Array.isArray(tasks)) workspaceStore.setTerminalBackgroundTasks(sessionId, normalizeBackgroundTasks(tasks))
+}
 
 function clearRuntimeStatusMeta(meta: SessionMeta | null): SessionMeta | null {
   if (!meta?.runtimeStatus && !meta?.runtimeMessage && !meta?.runtimeStatusStartedAt) return meta
@@ -1114,11 +1123,15 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
   }, [archiveDlog, sessionId])
 
+  const backgroundTasks = useWorkspace(
+    state => state.terminals.find(t => t.id === sessionId)?.backgroundTasks ?? NO_BACKGROUND_TASKS,
+  )
+  const liveBackground = useMemo(() => liveBackgroundIds(backgroundTasks), [backgroundTasks])
   // Agent activity tree: Task/Agent/Workflow tool calls (running AND
   // finished) nested via the subagent buckets, merged with `claude:task`
   // lifecycle metadata. Replaces the old running-only activeTasks filter.
   const agentTree = useMemo(() => {
-    const roots = buildAgentTaskTree(allMessages, subagentMessagesRef.current, taskLifecycle)
+    const roots = buildAgentTaskTree(allMessages, subagentMessagesRef.current, taskLifecycle, liveBackground)
     if (host.debug.isDebugMode === true && roots.length > 0) {
       host.debug.log(`[renderer] agentTree: ${roots.length} roots (${roots.map(r => `${r.id.slice(0, 8)}=${r.status}`).join(', ')})`)
     }
@@ -1126,8 +1139,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     // subagentStreamingText is a dep so freshly bucketed children (which live
     // in a ref and don't re-render on their own) show up promptly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allMessages, taskLifecycle, subagentStreamingText])
+  }, [allMessages, taskLifecycle, subagentStreamingText, liveBackground])
   const agentTreeSummary = useMemo(() => summarizeAgentTree(agentTree), [agentTree])
+  const backgroundOutsideTree = useMemo(
+    () => backgroundTasksOutsideTree(agentTree, backgroundTasks, taskLifecycle),
+    [agentTree, backgroundTasks, taskLifecycle],
+  )
+  const foregroundAgentsRunning = useMemo(() => countForegroundRunning(agentTree), [agentTree])
 
   // Stop a subagent/workflow by task id or tool_use id. Always terminates
   // matching lifecycle entries locally afterwards: a ghost entry (its task is
@@ -1146,16 +1164,19 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // Tick counter to force re-render for elapsed time display
   const [, setElapsedTick] = useState(0)
   const runAgentTreeTicker = useCallback(() => {
-    if (agentTreeSummary.running === 0) return
+    if (foregroundAgentsRunning === 0) return
     const interval = setInterval(() => setElapsedTick(t => t + 1), 1000)
     return () => clearInterval(interval)
-  }, [agentTreeSummary.running])
+  }, [foregroundAgentsRunning])
   usePanelActiveEffect(activation, runAgentTreeTicker)
 
   // A hidden tree resurfaces (as the collapsed bar) when new agents start.
   useEffect(() => {
     if (agentTreeSummary.running > 0) setAgentTreeView(v => (v === 'hidden' ? 'bar' : v))
   }, [agentTreeSummary.running])
+  useEffect(() => {
+    if (backgroundTasks.length > 0) setAgentTreeView(v => (v === 'hidden' ? 'bar' : v))
+  }, [backgroundTasks.length])
 
   // Compute pinned user messages (last 3 user messages that scrolled above viewport)
   // Show regardless of scroll position — the point is to always show context
@@ -2202,7 +2223,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       // Anything the host asked while the link was down never reached us, and
       // it will not be repeated. Ask what it is still blocked on.
       void host.claude.getSessionState(sessionId)
-        .then(state => adoptHostPendingPrompts(state as unknown as ClaudeSessionState))
+        .then(state => {
+          adoptHostPendingPrompts(state as unknown as ClaudeSessionState)
+          adoptHostBackgroundTasks(sessionId, state)
+        })
         .catch(() => { /* the poll re-dials; a later reconnect tries again */ })
     }
   }, [isRemoteConnected, sessionId, remoteDisconnectNoticeId, adoptHostPendingPrompts])
@@ -2246,6 +2270,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           setStreamingThinking(existingState.streamingThinking || '')
         }
         adoptHostPendingPrompts(existingState as unknown as ClaudeSessionState)
+        adoptHostBackgroundTasks(sessionId, existingState)
         const meta = await host.claude.getSessionMeta(sessionId).catch(() => null)
         if (cancelled || !meta) return
         setSessionMeta(meta as unknown as SessionMeta)
@@ -5385,10 +5410,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           ))}
         </div>
       )}
-      {agentTreeSummary.total > 0 && agentTreeView !== 'hidden' && (
+      {(agentTreeSummary.total > 0 || backgroundTasks.length > 0) && agentTreeView !== 'hidden' && (
         <AgentActivityTree
           roots={agentTree}
           summary={agentTreeSummary}
+          backgroundCount={backgroundTasks.length}
+          backgroundTasks={backgroundOutsideTree}
+          activation={activation}
           expanded={agentTreeView === 'tree'}
           onToggleExpanded={() => setAgentTreeView(v => (v === 'tree' ? 'bar' : 'tree'))}
           onHide={() => setAgentTreeView('hidden')}

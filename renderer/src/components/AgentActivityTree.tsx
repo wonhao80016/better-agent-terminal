@@ -7,14 +7,18 @@
 //     edges), keeping completed/error nodes, with per-node live detail:
 //     lifecycle progress text and the subagent's last streaming line.
 // Pure presentational component; the panel owns tree building and state.
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import type { TFunction } from 'i18next'
 import {
   formatAgentNodeElapsed,
+  formatTaskClock,
   lastStreamLine,
   type AgentTaskNode,
   type AgentTreeSummary,
 } from '../lib/agent-task-tree'
+import { backgroundTaskKind, backgroundTaskLabel } from '../lib/background-activity'
+import type { BackgroundTaskInfo } from '../types'
+import { createPanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 
 export interface AgentActivityTreeProps {
   roots: AgentTaskNode[]
@@ -26,6 +30,32 @@ export interface AgentActivityTreeProps {
   onOpenTask: (node: AgentTaskNode) => void
   onStopTask: (id: string) => void
   t: TFunction
+  /** Live background tasks reported by the host, including those in the tree. */
+  backgroundCount?: number
+  /** Live background tasks with no node in the tree (shell, Monitor, ...). */
+  backgroundTasks?: readonly BackgroundTaskInfo[]
+  /** Running clocks tick only while this panel is active. */
+  activation?: PanelActivation
+}
+
+const NO_BACKGROUND_TASKS: readonly BackgroundTaskInfo[] = []
+const ALWAYS_ACTIVE = createPanelActivation(true)
+
+// Ticks only this label, so long-lived background work does not re-render the panel.
+function TaskClock({ live, activation, format }: {
+  live: boolean
+  activation: PanelActivation
+  format: (now: number) => string
+}): JSX.Element | null {
+  const [, setTick] = useState(0)
+  const runTicker = useCallback(() => {
+    if (!live) return
+    const timer = setInterval(() => setTick(tick => tick + 1), 1000)
+    return () => clearInterval(timer)
+  }, [live])
+  usePanelActiveEffect(activation, runTicker)
+  const text = format(Date.now())
+  return text ? <span className="claude-active-task-time">{text}</span> : null
 }
 
 function statusGlyph(status: AgentTaskNode['status']): JSX.Element {
@@ -37,6 +67,7 @@ function statusGlyph(status: AgentTaskNode['status']): JSX.Element {
 export function AgentActivityTree({
   roots, summary, expanded, onToggleExpanded, onHide,
   streamingText, onOpenTask, onStopTask, t,
+  backgroundCount = 0, backgroundTasks = NO_BACKGROUND_TASKS, activation = ALWAYS_ACTIVE,
 }: AgentActivityTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set())
 
@@ -47,8 +78,36 @@ export function AgentActivityTree({
     return next
   })
 
+  const backgroundChip = backgroundCount > 0 && (
+    <span className="claude-agent-tree-chip is-background" onClick={onToggleExpanded} title={t('claude.agentTreeToggle')}>
+      {t('claude.backgroundRunning', { count: backgroundCount })}
+    </span>
+  )
+
+  const renderBackgroundTask = (task: BackgroundTaskInfo, rowStyle?: { paddingLeft: number }) => {
+    const kind = backgroundTaskKind(task)
+    return (
+      <div
+        key={`bg-${task.id}`}
+        className={rowStyle ? 'claude-agent-tree-row is-running' : 'claude-active-task-item'}
+        style={rowStyle}
+      >
+        {rowStyle && <span className="claude-agent-tree-chevron is-leaf">·</span>}
+        <span className="claude-active-task-dot is-background" />
+        <span className="claude-active-task-label">{backgroundTaskLabel(task).slice(0, 60)}</span>
+        {kind && <span className="claude-task-tag">{kind}</span>}
+        {task.startedAt > 0 && (
+          <TaskClock live activation={activation} format={now => formatTaskClock(now - task.startedAt)} />
+        )}
+        <span className="claude-task-tag">{t('claude.bg')}</span>
+        <button className="claude-task-stop-btn" onClick={(e) => { e.stopPropagation(); onStopTask(task.id) }}>Stop</button>
+      </div>
+    )
+  }
+
   const summaryChips = (
     <>
+      {backgroundChip}
       {summary.completed > 0 && (
         <span className="claude-agent-tree-chip is-done" onClick={onToggleExpanded} title={t('claude.agentTreeToggle')}>
           ✓ {summary.completed}
@@ -104,12 +163,13 @@ export function AgentActivityTree({
               {progressDesc && !isStalled && <span className="claude-active-task-progress">{progressDesc}</span>}
               {!progressDesc && liveLine && <span className="claude-active-task-progress">{liveLine}</span>}
               {isStalled && <span className="claude-active-task-stalled">{t('claude.stalled')}</span>}
-              {node.timestamp > 0 && <span className="claude-active-task-time">{formatAgentNodeElapsed(node, Date.now())}</span>}
+              <TaskClock live={node.status === 'running'} activation={activation} format={now => formatAgentNodeElapsed(node, now)} />
               {node.isBackground && <span className="claude-task-tag">{t('claude.bg')}</span>}
               <button className="claude-task-stop-btn" onClick={(e) => { e.stopPropagation(); onStopTask(node.id) }}>Stop</button>
             </div>
           )
         })}
+        {backgroundTasks.map(task => renderBackgroundTask(task))}
         {summaryChips}
         {controls}
       </div>
@@ -123,7 +183,6 @@ export function AgentActivityTree({
     const isStalled = rawProgress.startsWith('[stalled]')
     const progressDesc = rawProgress.trim() === node.label.trim() ? '' : rawProgress
     const liveLine = node.status === 'running' ? lastStreamLine(streamingText.get(node.id)) : ''
-    const elapsed = formatAgentNodeElapsed(node, Date.now())
     return (
       <div key={node.id} className="claude-agent-tree-node">
         <div
@@ -146,7 +205,7 @@ export function AgentActivityTree({
           {progressDesc && !isStalled && <span className="claude-active-task-progress">{progressDesc}</span>}
           {isStalled && <span className="claude-active-task-stalled">{t('claude.stalled')}</span>}
           {node.error && <span className="claude-agent-tree-error">{node.error}</span>}
-          {elapsed && <span className="claude-active-task-time">{elapsed}</span>}
+          <TaskClock live={node.status === 'running'} activation={activation} format={now => formatAgentNodeElapsed(node, now)} />
           {node.isBackground && <span className="claude-task-tag">{t('claude.bg')}</span>}
           {node.status === 'running' && (
             <button className="claude-task-stop-btn" onClick={(e) => { e.stopPropagation(); onStopTask(node.id) }}>Stop</button>
@@ -179,10 +238,15 @@ export function AgentActivityTree({
         {summary.error > 0 && (
           <span className="claude-agent-tree-chip is-error">{t('claude.agentsFailed', { count: summary.error })}</span>
         )}
+        {backgroundChip}
         {controls}
       </div>
       <div className="claude-agent-tree-body">
         {roots.map(node => renderNode(node, 0))}
+        {backgroundTasks.length > 0 && (
+          <div className="claude-agent-tree-section">{t('claude.backgroundTasksTitle')}</div>
+        )}
+        {backgroundTasks.map(task => renderBackgroundTask(task, { paddingLeft: 8 }))}
       </div>
     </div>
   )

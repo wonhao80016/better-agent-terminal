@@ -64,6 +64,17 @@ export const WORKSPACE_COLORS = [
   { id: 'gray', value: '#95a5a6', label: 'Gray' },
 ] as const
 
+// One entry of the sidecar's `claude:background-tasks` list.
+export interface BackgroundTaskInfo {
+  id: string;
+  type: string | null;
+  description: string;
+  subagentType?: string;
+  toolUseId: string | null;
+  startedAt: number;
+  isAgent: boolean;              // Only agent tasks hold notifications and count in the indicator
+}
+
 export interface TerminalInstance {
   id: string;
   workspaceId: string;
@@ -79,6 +90,7 @@ export interface TerminalInstance {
   pendingActionLabel?: string;     // Transient: what the agent is waiting on (for the bell list)
   pendingActionKind?: 'permission' | 'question';
   isAgentRunning?: boolean;       // Transient: pins a live agent panel in renderer memory
+  backgroundTasks?: BackgroundTaskInfo[]; // Transient: host-reported live background tasks
   hasUserInput?: boolean;         // Tracks user input before auto-running agent command
   agentCommandSent?: boolean;     // Prevents duplicate auto-run agent commands
   sdkSessionId?: string;         // Claude SDK session ID for auto-resume

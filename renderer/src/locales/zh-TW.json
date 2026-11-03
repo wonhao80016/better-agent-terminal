@@ -255,7 +255,8 @@
     "runningCount": "{{count}} 個執行中",
     "otherWindow": "{{name}} 視窗",
     "sectionNeedsYou": "需要你",
-    "sectionRunning": "執行中"
+    "sectionRunning": "執行中",
+    "backgroundTasksTooltip": "背景執行中 {{count}} 個 agent"
   },
 
   "sidebar": {
@@ -673,6 +674,8 @@
     "agentsRunning": "{{count}} 執行中",
     "agentsDone": "{{count}} 已完成",
     "agentsFailed": "{{count}} 失敗",
+    "backgroundTasksTitle": "背景任務",
+    "backgroundRunning": "背景執行中 {{count}}",
     "messages": "{{count}} 則訊息",
     "subagentTranscript": "執行紀錄",
     "subagentNoTranscript": "未記錄此代理的執行紀錄",

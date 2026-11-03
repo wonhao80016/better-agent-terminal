@@ -1171,9 +1171,11 @@ async function inProcess() {
     // SDK init status, the responded-clear status (runtimeStatus cleared the
     // moment the first assistant frame arrives), assistant message, result,
     // turn-end (in order).
-    const events = captured.filter(c => c.name && c.name.startsWith('claude:'))
+    const events = captured.filter(c => c.name && c.name.startsWith('claude:') && c.name !== 'claude:background-tasks')
     const seq = events.map(e => e.name)
     assert.deepEqual(seq, ['claude:message', 'claude:status', 'claude:status', 'claude:status', 'claude:status', 'claude:message', 'claude:result', 'claude:turn-end'])
+    // A new background tracker publishes its empty list once, before the CLI starts.
+    assert.deepEqual(captured.filter(c => c.name === 'claude:background-tasks').map(c => c.payload.tasks), [[]])
     assert.equal(events[0].payload.message.role, 'user')
     assert.equal(events[0].payload.message.content, 'hi')
     assert.equal(events[1].payload.meta.runtimeStatus, 'starting')

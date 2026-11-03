@@ -39,10 +39,15 @@
 
 ## Sub-agent / Active Tasks Tracking
 
-- The Claude Agent SDK does **NOT** reliably emit `task_started` / `task_progress` / `task_notification` system messages.
-- We track Agent/Task tools from `tool_use` blocks directly in `session.activeTasks` (in `claude-agent-manager.ts`).
-- `stopTask()` falls back to using `toolUseId` as `task_id` when no mapping exists.
-- Tool results for Agent/Task must clean up `activeTasks` entries.
+- Sidecar `node-sidecar/src/handlers/claude-send.mjs` mirrors SDK `task_started` / `task_updated` / `task_notification` into `s.activeTasks` and emits `claude:task`; the renderer merges them with Agent/Task `tool_use` blocks in `renderer/src/lib/agent-task-tree.ts`.
+- Background tasks (run_in_background Agent/Bash, Monitor, ...) live in `node-sidecar/src/lib/background-tasks.mjs`: SDK `background_tasks_changed` (non-ambient entries) is authoritative; edge events (task_started / task_updated / task_notification, run_in_background tool results) are a fallback until the first level frame, reconciled with `s.activeTasks` at each result. Changes are emitted as `claude:background-tasks {sessionId, tasks}` (a new tracker first sends `[]`) and returned by `claude.getSessionState().backgroundTasks`.
+- Only **agent** tasks (`isAgent`: SDK task types `local_agent` / `local_workflow`, or an untyped entry with `subagent_type`) make a turn hold its notification and count in the indicator. Background shells (`local_bash`, e.g. dev servers), monitors and launch-only entries are listed in the Active Tasks bar but never start a hold (some can delay the CLI's `'idle'` while an agent hold waits; the watchdog bounds that).
+- `task_notification` ends (emits `claude:task`) only background tasks; foreground tasks keep their tool_result and the turn-end cleanup.
+- Completion notification: a completed `claude:turn-end` with no live agents and no held completion notifies on the turn-end itself. Otherwise it carries `pendingBackground > 0` (live agents) or `awaitingIdle: true` and the notification is sent later as `claude:background-settled`. With `session_state_changed` (the sidecar sets `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`) that happens on `'idle'` with no live agents; an `'idle'` that precedes the result notifies on the turn-end, and a 30 s watchdog covers a missing `'idle'`. Older CLIs use a 10 s grace after the last agent ends with no main-thread frame (`status: requesting`, `thinking_tokens`, stream/assistant/user frames). A new `claude.sendMessage` turn first announces a completion held with no live agents (the CLI sends no `'idle'` between queued turns).
+- The host (`src-tauri/src/commands/notification.rs`) holds while `pendingBackground > 0` or `awaitingIdle` and notifies once per `workId`. Work ids are unique across session records and sidecar restarts; the host also forgets the last one on session registration and `claude:session-reset`.
+- A CLI that exits or is closed while a completion is held announces it via `claude:background-settled`, except for a user abort (`closeLiveQuery(s, { userAbort: true })`: abort / stop / reset / rest / reload / resume swap).
+- `stopTask()` maps a `toolUseId` to its `task_id` and works after the turn ends while background tasks are alive.
+- Renderer: `App.tsx` stores the list per terminal (`workspaceStore.setTerminalBackgroundTasks`; panel mount and remote reconnect re-adopt `getSessionState().backgroundTasks`); `ActivityIndicator` shows a slow blue pulse with the background agent count when agents > 0 and the main agent is idle; the Active Tasks bar keeps background agents running and lists other background tasks until they end. Elapsed clocks in the bar tick on their own (`TaskClock`), not by re-rendering the panel.
 
 ## React Rendering
 

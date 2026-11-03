@@ -1,11 +1,12 @@
 import { host } from '../host-api'
 import { v4 as uuidv4 } from 'uuid'
-import type { Workspace, TerminalInstance, AppState } from '../types'
+import type { Workspace, TerminalInstance, AppState, BackgroundTaskInfo } from '../types'
 import { CODEX_EFFORT_LEVELS } from '../types'
 import { AgentPresetId, getAgentPreset } from '../types/agent-presets'
 import { normalizeAgentParams } from '../types/agent-profiles'
 import { clearPreviewCache } from '../components/TerminalThumbnail'
 import { settingsStore } from './settings-store'
+import { sameBackgroundTasks } from '../lib/background-activity'
 
 type Listener = () => void
 
@@ -295,6 +296,7 @@ class WorkspaceStore {
       pendingImages: undefined,
       hasPendingAction: false,
       isAgentRunning: false,
+      backgroundTasks: undefined,
       scrollbackBuffer: [],
       pid: undefined,
     }
@@ -884,6 +886,18 @@ class WorkspaceStore {
       ...this.state,
       terminals: this.state.terminals.map(t =>
         t.id === id ? { ...t, isAgentRunning: running } : t
+      )
+    }
+    this.notify()
+  }
+
+  setTerminalBackgroundTasks(id: string, tasks: BackgroundTaskInfo[]): void {
+    const terminal = this.state.terminals.find(t => t.id === id)
+    if (!terminal || sameBackgroundTasks(terminal.backgroundTasks, tasks)) return
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t =>
+        t.id === id ? { ...t, backgroundTasks: tasks.length > 0 ? tasks : undefined } : t
       )
     }
     this.notify()

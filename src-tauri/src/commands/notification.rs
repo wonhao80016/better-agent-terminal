@@ -1,7 +1,8 @@
 // notification:* — in-memory notification center.
 //
 // Rust records agent sessions at the command boundary; when the runtime event
-// hub sees a completed `claude:turn-end`, it inserts an entry here.
+// hub sees a completed `claude:turn-end` with no background work still running,
+// or the `claude:background-settled` that follows one, it inserts an entry here.
 //
 // State is process-local: entries are not persisted across launches.
 
@@ -121,6 +122,11 @@ pub struct AgentNotificationState {
 struct AgentActivity {
     last_data_at: Option<i64>,
     is_streaming: Option<bool>,
+    background_tasks: Option<usize>,
+    // Set while a completed turn's notification waits for its background agents.
+    awaiting_background: bool,
+    // Sidecar work id of the last notification; one unit of work notifies once.
+    last_notified_work: Option<u64>,
 }
 
 impl AgentActivity {
@@ -150,6 +156,12 @@ impl AgentActivity {
                     }
                 }
             }
+            "claude:background-tasks" => {
+                let count = payload.get("tasks").and_then(Value::as_array).map_or(0, |tasks| {
+                    tasks.iter().filter(|task| task.get("isAgent").and_then(Value::as_bool) == Some(true)).count()
+                });
+                self.background_tasks = Some(count);
+            }
             "claude:history" => {
                 // History replay supplies original timestamps, not replay time.
                 if let Some(items) = payload.get("items").or_else(|| payload.get("messages")).and_then(Value::as_array) {
@@ -170,8 +182,59 @@ impl AgentActivity {
         if let Some(map) = meta.as_object_mut() {
             map.insert("lastDataAt".into(), json!(self.last_data_at));
             if let Some(active) = self.is_streaming { map.insert("isStreaming".into(), json!(active)); }
+            if let Some(count) = self.background_tasks { map.insert("backgroundTaskCount".into(), json!(count)); }
         }
         meta
+    }
+
+    /// Returns the completion result when this event finishes a unit of
+    /// agent work: `Some(result)` notifies, `None` does not.
+    fn completion_from_event(&mut self, topic: &str, payload: &Value) -> Option<Option<String>> {
+        let event_payload = payload.get("payload").unwrap_or(payload);
+        let result = || {
+            event_payload
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        match topic {
+            "claude:turn-end" => match event_payload.get("reason").and_then(Value::as_str) {
+                Some("completed") => {
+                    // Sidecars that predate background tracking omit these fields
+                    // and keep notifying on every completed turn.
+                    let pending = event_payload.get("pendingBackground").and_then(Value::as_u64);
+                    let awaiting_idle = event_payload.get("awaitingIdle").and_then(Value::as_bool) == Some(true);
+                    if awaiting_idle || pending.is_some_and(|count| count > 0) {
+                        self.awaiting_background = true;
+                        return None;
+                    }
+                    self.awaiting_background = false;
+                    self.notify_once(event_payload).then(result)
+                }
+                Some("aborted") | Some("error") => {
+                    self.awaiting_background = false;
+                    None
+                }
+                _ => None,
+            },
+            "claude:background-settled" if self.awaiting_background => {
+                self.awaiting_background = false;
+                self.notify_once(event_payload).then(result)
+            }
+            _ => None,
+        }
+    }
+
+    fn notify_once(&mut self, event_payload: &Value) -> bool {
+        let Some(work_id) = event_payload.get("workId").and_then(Value::as_u64) else {
+            return true;
+        };
+        if self.last_notified_work == Some(work_id) {
+            return false;
+        }
+        self.last_notified_work = Some(work_id);
+        true
     }
 
     fn enrich_runtime(&self, meta: Value) -> Value {
@@ -183,6 +246,18 @@ impl AgentActivity {
             map.insert("isStreaming".into(), json!(streaming));
         }
         enriched
+    }
+}
+
+/// A new or reset session run starts a new work id sequence. A held completion
+/// survives re-registration but not a reset, which drops the background work.
+fn forget_notified_work(state: &AgentNotificationState, session_id: &str, drop_held: bool) {
+    let mut activity = state.activity.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = activity.get_mut(session_id) {
+        entry.last_notified_work = None;
+        if drop_held {
+            entry.awaiting_background = false;
+        }
     }
 }
 
@@ -627,6 +702,7 @@ fn register_agent_session_for_owner(
         log_agent_session_collision(app, &message);
         return Err(message);
     }
+    forget_notified_work(&state, session_id, false);
     // Ownership is independent of notification metadata. A malformed or
     // legacy start request without cwd may fail later in the runtime, but it
     // still has to claim its process-wide session id above.
@@ -763,30 +839,31 @@ pub fn get_agent_session_window(app: &HostContext, session_id: &str) -> Option<S
 }
 
 pub fn add_agent_completion_from_event(app: &HostContext, topic: &str, payload: &Value) {
-    if topic != "claude:turn-end" {
+    if topic != "claude:turn-end" && topic != "claude:background-settled" {
         return;
     }
     let Some(session_id) = payload.get("sessionId").and_then(Value::as_str) else {
         return;
     };
-    let event_payload = payload.get("payload").unwrap_or(payload);
-    if event_payload.get("reason").and_then(Value::as_str) != Some("completed") {
-        return;
-    }
     let Some(agent_state) = app.try_state::<AgentNotificationState>() else {
         return;
     };
     let Some(session) = agent_state.lock().get(session_id).cloned() else {
         return;
     };
+    let Some(result) = agent_state
+        .activity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(session_id.to_string())
+        .or_default()
+        .completion_from_event(topic, payload)
+    else {
+        return;
+    };
     let Some(notification_state) = app.try_state::<NotificationState>() else {
         return;
     };
-    let result = event_payload
-        .get("result")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
     add_entry(
         app,
         &notification_state,
@@ -858,6 +935,7 @@ pub fn update_agent_session_meta_from_event(app: &HostContext, topic: &str, payl
                 session.sdk_session_id = None;
                 session.latest_meta = None;
             }
+            forget_notified_work(&state, id, true);
         }
         return;
     }
@@ -1475,6 +1553,135 @@ mod tests {
         assert_eq!(running["runtimeStatus"], "queued");
         assert_eq!(running["lastDataAt"], 200);
         assert!(activity.enrich_runtime(Value::Null).is_null());
+    }
+
+    fn turn_end(payload: Value) -> Value {
+        json!({ "sessionId": "s1", "payload": payload })
+    }
+
+    #[test]
+    fn completion_waits_for_background_work_and_notifies_once() {
+        let mut activity = AgentActivity::default();
+        let held = turn_end(json!({ "reason": "completed", "result": "main", "pendingBackground": 2 }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &held), None);
+        assert!(activity.awaiting_background);
+
+        let settled = json!({ "sessionId": "s1", "result": "main" });
+        assert_eq!(
+            activity.completion_from_event("claude:background-settled", &settled),
+            Some(Some("main".to_string()))
+        );
+        assert_eq!(activity.completion_from_event("claude:background-settled", &settled), None);
+        assert!(!activity.awaiting_background);
+    }
+
+    #[test]
+    fn follow_up_turn_carries_the_deferred_completion() {
+        let mut activity = AgentActivity::default();
+        let held = turn_end(json!({ "reason": "completed", "result": "main", "pendingBackground": 1 }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &held), None);
+        let follow_up = turn_end(json!({ "reason": "completed", "result": "agent done", "pendingBackground": 0 }));
+        assert_eq!(
+            activity.completion_from_event("claude:turn-end", &follow_up),
+            Some(Some("agent done".to_string()))
+        );
+        let late_settle = json!({ "sessionId": "s1", "result": "main" });
+        assert_eq!(activity.completion_from_event("claude:background-settled", &late_settle), None);
+    }
+
+    #[test]
+    fn completion_without_pending_field_keeps_legacy_behavior() {
+        let mut activity = AgentActivity::default();
+        let legacy = turn_end(json!({ "reason": "completed", "result": "done" }));
+        assert_eq!(
+            activity.completion_from_event("claude:turn-end", &legacy),
+            Some(Some("done".to_string()))
+        );
+        let empty = turn_end(json!({ "reason": "completed", "result": "" }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &empty), Some(None));
+        for reason in ["interrupted", "aborted", "error"] {
+            let ended = turn_end(json!({ "reason": reason }));
+            assert_eq!(activity.completion_from_event("claude:turn-end", &ended), None);
+        }
+        let unsolicited = json!({ "sessionId": "s1", "result": "x" });
+        assert_eq!(activity.completion_from_event("claude:background-settled", &unsolicited), None);
+    }
+
+    #[test]
+    fn hard_stop_cancels_a_deferred_completion() {
+        let mut activity = AgentActivity::default();
+        let held = turn_end(json!({ "reason": "completed", "pendingBackground": 1 }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &held), None);
+        assert_eq!(activity.completion_from_event("claude:turn-end", &turn_end(json!({ "reason": "aborted" }))), None);
+        let settled = json!({ "sessionId": "s1" });
+        assert_eq!(activity.completion_from_event("claude:background-settled", &settled), None);
+    }
+
+    #[test]
+    fn agent_activity_reports_background_agent_count() {
+        let mut activity = AgentActivity::default();
+        assert!(activity.enrich(json!({})).get("backgroundTaskCount").is_none());
+        let tasks = json!([
+            { "id": "a", "type": "local_agent", "isAgent": true },
+            { "id": "w", "type": "local_workflow", "isAgent": true },
+            { "id": "b", "type": "local_bash", "isAgent": false },
+        ]);
+        activity.observe("claude:background-tasks", &json!({ "sessionId": "s1", "tasks": tasks }), 100);
+        assert_eq!(activity.enrich(json!({}))["backgroundTaskCount"], 2, "shells do not count");
+        assert_eq!(activity.last_data_at, None, "the list is state, not agent output");
+        activity.observe("claude:background-tasks", &json!({ "sessionId": "s1", "tasks": [] }), 200);
+        assert_eq!(activity.enrich(json!({}))["backgroundTaskCount"], 0);
+    }
+
+    #[test]
+    fn awaiting_idle_holds_until_the_sidecar_settles() {
+        let mut activity = AgentActivity::default();
+        let held = turn_end(json!({
+            "reason": "completed", "result": "main", "pendingBackground": 0, "awaitingIdle": true, "workId": 1
+        }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &held), None);
+        let settled = json!({ "sessionId": "s1", "result": "main", "workId": 1 });
+        assert_eq!(
+            activity.completion_from_event("claude:background-settled", &settled),
+            Some(Some("main".to_string()))
+        );
+    }
+
+    #[test]
+    fn one_unit_of_work_notifies_once() {
+        let mut activity = AgentActivity::default();
+        let held = turn_end(json!({ "reason": "completed", "result": "main", "pendingBackground": 1, "workId": 4 }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &held), None);
+        let settled = json!({ "sessionId": "s1", "result": "main", "workId": 4 });
+        assert_eq!(
+            activity.completion_from_event("claude:background-settled", &settled),
+            Some(Some("main".to_string()))
+        );
+        let late_self_turn = turn_end(json!({ "reason": "completed", "result": "agent done", "pendingBackground": 0, "workId": 4 }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &late_self_turn), None);
+        let next = turn_end(json!({ "reason": "completed", "result": "next", "pendingBackground": 0, "workId": 5 }));
+        assert_eq!(activity.completion_from_event("claude:turn-end", &next), Some(Some("next".to_string())));
+    }
+
+    #[test]
+    fn a_new_session_run_notifies_a_reused_work_id_again() {
+        let state = AgentNotificationState::default();
+        let done = turn_end(json!({ "reason": "completed", "result": "one", "pendingBackground": 0, "workId": 1 }));
+        let held = turn_end(json!({ "reason": "completed", "result": "two", "pendingBackground": 1, "workId": 2 }));
+        let read = |state: &AgentNotificationState| state.activity.lock().unwrap().get("s1").cloned().unwrap();
+        {
+            let mut activity = state.activity.lock().unwrap();
+            let entry = activity.entry("s1".into()).or_default();
+            assert_eq!(entry.completion_from_event("claude:turn-end", &done), Some(Some("one".to_string())));
+            assert_eq!(entry.completion_from_event("claude:turn-end", &held), None);
+        }
+        forget_notified_work(&state, "s1", false);
+        assert_eq!(read(&state).last_notified_work, None);
+        assert!(read(&state).awaiting_background, "re-registration keeps a held completion");
+        forget_notified_work(&state, "s1", true);
+        let mut entry = read(&state);
+        assert!(!entry.awaiting_background, "a reset drops a held completion");
+        assert_eq!(entry.completion_from_event("claude:turn-end", &done), Some(Some("one".to_string())));
     }
 
     #[test]

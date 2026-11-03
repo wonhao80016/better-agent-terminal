@@ -438,6 +438,7 @@ const CLAUDE_EVENT_PAYLOAD_KEYS: Record<string, string> = {
   onWorktreeInfo: 'payload',
   onPromptSuggestion: 'suggestion',
   onTask: 'task',
+  onBackgroundTasks: 'tasks',
 }
 
 const CLAUDE_EVENT_PAYLOAD_FALLBACKS = new Set(['onHistory', 'onResumeLoading'])
@@ -1384,6 +1385,8 @@ function createTauriHost(): BatAppAPI {
           // workflow / subagent is running, which matters for the soft vs
           // hard interrupt UX.
           onTask: 'claude:task',
+          // Full list of live background tasks, replaced on every change.
+          onBackgroundTasks: 'claude:background-tasks',
         }
         if (eventListeners[key]) {
           const evName = eventListeners[key]

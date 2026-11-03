@@ -137,13 +137,17 @@ function nodeFromToolCall(
   buckets: ReadonlyMap<string, MessageItem[]>,
   lifecycle: ReadonlyMap<string, TaskLifecycle>,
   visited: Set<string>,
+  liveBackground: ReadonlySet<string>,
 ): AgentTaskNode {
   const life = lifecycle.get(tool.id)
   const lifeError = life?.status != null && TERMINAL_ERROR_STATUSES.has(life.status)
+  // The host's live background list outranks the tool block: a
+  // run_in_background call completes with "launched" while its task runs on.
+  const inBackground = liveBackground.has(tool.id) || (life != null && liveBackground.has(life.id))
   // A terminal lifecycle status overrides a stuck-running tool block in both
   // directions: failed/killed → error, completed → completed. The tool_result
   // can be lost (denied tools, reconnects), but the task is gone either way.
-  const status: AgentTaskNode['status'] = tool.status === 'running'
+  const status: AgentTaskNode['status'] = inBackground ? 'running' : tool.status === 'running'
     ? (lifeError ? 'error' : life?.status === 'completed' ? 'completed' : 'running')
     : tool.status === 'error' ? 'error' : 'completed'
   const node: AgentTaskNode = {
@@ -152,7 +156,7 @@ function nodeFromToolCall(
     label: labelForToolCall(tool, life),
     status,
     timestamp: tool.timestamp,
-    children: buildChildren(tool.id, buckets, lifecycle, visited),
+    children: buildChildren(tool.id, buckets, lifecycle, visited, liveBackground),
   }
   const subagentType = typeof tool.input.subagent_type === 'string'
     ? tool.input.subagent_type
@@ -163,7 +167,7 @@ function nodeFromToolCall(
   // live progress text available for Task/Agent nodes.
   const progress = tool.description || life?.description
   if (progress) node.progressText = progress
-  if (tool.input.run_in_background === true) node.isBackground = true
+  if (tool.input.run_in_background === true || inBackground) node.isBackground = true
   if (life?.workflowName) node.workflowName = life.workflowName
   if (life?.error) node.error = life.error
   if (status !== 'running') {
@@ -178,6 +182,7 @@ function buildChildren(
   buckets: ReadonlyMap<string, MessageItem[]>,
   lifecycle: ReadonlyMap<string, TaskLifecycle>,
   visited: Set<string>,
+  liveBackground: ReadonlySet<string>,
 ): AgentTaskNode[] {
   if (visited.has(parentId)) return []
   visited.add(parentId)
@@ -187,16 +192,18 @@ function buildChildren(
   for (const item of bucket) {
     // visited check doubles as the cycle guard for malformed buckets.
     if (isAgentToolCall(item) && !visited.has(item.id)) {
-      children.push(nodeFromToolCall(item, buckets, lifecycle, visited))
+      children.push(nodeFromToolCall(item, buckets, lifecycle, visited, liveBackground))
     }
   }
   return children
 }
 
-function nodeFromLifecycle(life: TaskLifecycle): AgentTaskNode {
-  const status: AgentTaskNode['status'] = life.status != null && TERMINAL_ERROR_STATUSES.has(life.status)
-    ? 'error'
-    : life.status === 'completed' ? 'completed' : 'running'
+function nodeFromLifecycle(life: TaskLifecycle, liveBackground: ReadonlySet<string>): AgentTaskNode {
+  const status: AgentTaskNode['status'] = liveBackground.has(life.id)
+    ? 'running'
+    : life.status != null && TERMINAL_ERROR_STATUSES.has(life.status)
+      ? 'error'
+      : life.status === 'completed' ? 'completed' : 'running'
   const node: AgentTaskNode = {
     id: life.id,
     kind: life.isWorkflow ? 'workflow' : 'task',
@@ -209,7 +216,7 @@ function nodeFromLifecycle(life: TaskLifecycle): AgentTaskNode {
   if (life.description) node.progressText = life.description
   if (life.workflowName) node.workflowName = life.workflowName
   if (life.error) node.error = life.error
-  if (life.isBackground) node.isBackground = true
+  if (life.isBackground || liveBackground.has(life.id)) node.isBackground = true
   return node
 }
 
@@ -241,6 +248,7 @@ export function buildAgentTaskTree(
   messages: readonly MessageItem[],
   buckets: ReadonlyMap<string, MessageItem[]>,
   lifecycle: ReadonlyMap<string, TaskLifecycle> = new Map(),
+  liveBackground: ReadonlySet<string> = new Set(),
 ): AgentTaskNode[] {
   // Index lifecycle entries under their tool_use id too, so tool nodes pick
   // up the metadata of entries bound via SDK tool_use_id (task_id and
@@ -256,7 +264,7 @@ export function buildAgentTaskTree(
   const matchedIds = new Set<string>()
   for (const item of messages) {
     if (!isAgentToolCall(item) || item.parentToolUseId) continue
-    roots.push(nodeFromToolCall(item, buckets, lifeByNode, visited))
+    roots.push(nodeFromToolCall(item, buckets, lifeByNode, visited, liveBackground))
     matchedIds.add(item.id)
   }
   const hasNode = (id: string | null | undefined): boolean =>
@@ -266,9 +274,54 @@ export function buildAgentTaskTree(
     // only decorate that node — never duplicate it as an orphan root.
     if (hasNode(life.id) || hasNode(life.toolUseId)) continue
     if (!isAgentLifecycle(life)) continue
-    roots.push(nodeFromLifecycle(life))
+    roots.push(nodeFromLifecycle(life, liveBackground))
   }
   return roots
+}
+
+export function liveBackgroundIds(
+  tasks: readonly { id: string; toolUseId?: string | null }[],
+): Set<string> {
+  const ids = new Set<string>()
+  for (const task of tasks) {
+    ids.add(task.id)
+    if (task.toolUseId) ids.add(task.toolUseId)
+  }
+  return ids
+}
+
+export function countForegroundRunning(roots: readonly AgentTaskNode[]): number {
+  let count = 0
+  const walk = (nodes: readonly AgentTaskNode[]) => {
+    for (const node of nodes) {
+      if (node.status === 'running' && !node.isBackground) count += 1
+      walk(node.children)
+    }
+  }
+  walk(roots)
+  return count
+}
+
+/** Background tasks with no tree node (shells, Monitor, other non-agents) for the bar's background section. */
+export function backgroundTasksOutsideTree<T extends { id: string; toolUseId?: string | null }>(
+  roots: readonly AgentTaskNode[],
+  tasks: readonly T[],
+  lifecycle: ReadonlyMap<string, TaskLifecycle> = new Map(),
+): T[] {
+  const nodeIds = new Set<string>()
+  const walk = (nodes: readonly AgentTaskNode[]) => {
+    for (const node of nodes) {
+      nodeIds.add(node.id)
+      walk(node.children)
+    }
+  }
+  walk(roots)
+  return tasks.filter(task => {
+    const boundToolUseId = lifecycle.get(task.id)?.toolUseId
+    return !nodeIds.has(task.id)
+      && !(task.toolUseId && nodeIds.has(task.toolUseId))
+      && !(boundToolUseId && nodeIds.has(boundToolUseId))
+  })
 }
 
 /**

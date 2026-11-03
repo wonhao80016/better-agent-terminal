@@ -255,7 +255,8 @@
     "runningCount": "{{count}} running",
     "otherWindow": "{{name}} window",
     "sectionNeedsYou": "Needs you",
-    "sectionRunning": "Running"
+    "sectionRunning": "Running",
+    "backgroundTasksTooltip": "{{count}} background agent(s) running"
   },
 
   "sidebar": {
@@ -674,6 +675,8 @@
     "agentsRunning": "{{count}} running",
     "agentsDone": "{{count}} done",
     "agentsFailed": "{{count}} failed",
+    "backgroundTasksTitle": "Background",
+    "backgroundRunning": "Background running {{count}}",
     "messages": "{{count}} messages",
     "subagentTranscript": "TRANSCRIPT",
     "subagentNoTranscript": "No transcript captured for this agent",

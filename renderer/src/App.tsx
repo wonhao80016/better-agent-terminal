@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
 import { workspaceStore } from './stores/workspace-store'
+import { normalizeBackgroundTasks } from './lib/background-activity'
 import { settingsStore } from './stores/settings-store'
 import { Sidebar } from './components/Sidebar'
 import { UpdateBanner } from './components/UpdateBanner'
@@ -898,6 +899,12 @@ export default function App() {
       }))
     })
 
+    // Window-wide so indicators of terminals whose agent panel is not mounted
+    // still follow the host's background-task list.
+    const unsubBackgroundTasks = host.claude.onBackgroundTasks((sessionId: string, tasks: unknown) => {
+      workspaceStore.setTerminalBackgroundTasks(sessionId, normalizeBackgroundTasks(tasks))
+    })
+
     return () => {
       unsubscribe()
       unsubscribeOutput()
@@ -906,6 +913,7 @@ export default function App() {
       unsubDetach()
       unsubReattach()
       unsubAccountChanged()
+      unsubBackgroundTasks()
     }
   }, [])
 

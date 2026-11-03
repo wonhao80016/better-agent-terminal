@@ -256,6 +256,26 @@
   color: var(--claude-accent);
   background: rgba(224, 153, 86, 0.12);
 }
+.claude-agent-tree-chip.is-background {
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.12);
+}
+.claude-active-task-dot.is-background {
+  background: #3b82f6;
+  animation-duration: 3s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .claude-active-task-dot.is-background {
+    animation: none;
+  }
+}
+.claude-agent-tree-section {
+  padding: 4px 8px 2px;
+  font-size: calc(var(--claude-font-size) - 2px);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 
 .claude-agent-tree-body {
   overflow-y: auto;
