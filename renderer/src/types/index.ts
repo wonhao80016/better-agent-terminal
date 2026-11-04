@@ -72,7 +72,7 @@ export interface BackgroundTaskInfo {
   subagentType?: string;
   toolUseId: string | null;
   startedAt: number;
-  isAgent: boolean;              // Only agent tasks hold notifications and count in the indicator
+  isAgent: boolean;              // Only agent tasks hold the completion notification
 }
 
 export interface TerminalInstance {

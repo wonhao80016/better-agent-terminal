@@ -252,7 +252,8 @@
     "otherWindow": "{{name}} ウィンドウ",
     "sectionNeedsYou": "対応が必要",
     "sectionRunning": "実行中",
-    "backgroundTasksTooltip": "バックグラウンドで {{count}} 件のエージェントを実行中"
+    "backgroundAgentsTooltip": "バックグラウンドエージェント ×{{count}}：{{names}}",
+    "backgroundCommandsTooltip": "バックグラウンドコマンド ×{{count}}：{{names}}"
   },
   "sidebar": {
     "workspaces": "ワークスペース",

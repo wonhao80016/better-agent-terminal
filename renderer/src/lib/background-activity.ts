@@ -8,8 +8,12 @@ export interface ActivitySnapshot {
   lastActivityTime: number | null
   agentRunning: boolean
   backgroundCount: number
-  backgroundLabels: string
+  backgroundAgentCount: number
+  backgroundAgentNames: string
+  backgroundCommandNames: string
 }
+
+export const BACKGROUND_TOOLTIP_MAX_NAMES = 3
 
 type ActivityTerminal = Pick<TerminalInstance, 'lastActivityTime' | 'isAgentRunning' | 'backgroundTasks'>
 
@@ -71,19 +75,24 @@ export function backgroundTaskKind(task: BackgroundTaskInfo): string | null {
   return BACKGROUND_KIND_LABELS[task.type] ?? task.type
 }
 
-// Only background agents count: a shell or monitor can outlive every turn.
-// A terminal with background agents reports the main agent only through
-// isAgentRunning, since their output keeps refreshing lastActivityTime.
+function formatNames(labels: readonly string[]): string {
+  const shown = labels.slice(0, BACKGROUND_TOOLTIP_MAX_NAMES).join(', ')
+  const hidden = labels.length - BACKGROUND_TOOLTIP_MAX_NAMES
+  return hidden > 0 ? `${shown} +${hidden}` : shown
+}
+
+// Every background task counts, but only agents hold the completion notification.
+// A terminal with background tasks reports the main agent only through
+// isAgentRunning, since background messages keep refreshing lastActivityTime.
 export function summarizeActivity(terminals: readonly ActivityTerminal[]): ActivitySnapshot {
   let lastActivityTime: number | null = null
   let agentRunning = false
-  let backgroundCount = 0
-  const labels: string[] = []
+  const agentLabels: string[] = []
+  const commandLabels: string[] = []
   for (const terminal of terminals) {
-    const agents = (terminal.backgroundTasks ?? []).filter(task => task.isAgent)
-    if (agents.length > 0) {
-      backgroundCount += agents.length
-      for (const task of agents) labels.push(backgroundTaskLabel(task))
+    const tasks = terminal.backgroundTasks ?? []
+    if (tasks.length > 0) {
+      for (const task of tasks) (task.isAgent ? agentLabels : commandLabels).push(backgroundTaskLabel(task))
       if (terminal.isAgentRunning) agentRunning = true
       continue
     }
@@ -91,7 +100,35 @@ export function summarizeActivity(terminals: readonly ActivityTerminal[]): Activ
       lastActivityTime = terminal.lastActivityTime
     }
   }
-  return { lastActivityTime, agentRunning, backgroundCount, backgroundLabels: labels.join('\n') }
+  return {
+    lastActivityTime,
+    agentRunning,
+    backgroundCount: agentLabels.length + commandLabels.length,
+    backgroundAgentCount: agentLabels.length,
+    backgroundAgentNames: formatNames(agentLabels),
+    backgroundCommandNames: formatNames(commandLabels),
+  }
+}
+
+export function backgroundActivityTooltip(
+  snapshot: ActivitySnapshot,
+  t: (key: string, options: { count: number; names: string }) => string,
+): string | undefined {
+  const commandCount = snapshot.backgroundCount - snapshot.backgroundAgentCount
+  const lines: string[] = []
+  if (snapshot.backgroundAgentCount > 0) {
+    lines.push(t('notifications.backgroundAgentsTooltip', {
+      count: snapshot.backgroundAgentCount,
+      names: snapshot.backgroundAgentNames,
+    }))
+  }
+  if (commandCount > 0) {
+    lines.push(t('notifications.backgroundCommandsTooltip', {
+      count: commandCount,
+      names: snapshot.backgroundCommandNames,
+    }))
+  }
+  return lines.length > 0 ? lines.join('\n') : undefined
 }
 
 export function resolveActivityDotState(input: {

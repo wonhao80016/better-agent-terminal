@@ -248,7 +248,8 @@
     "otherWindow": "{{name}} 窗口",
     "sectionNeedsYou": "需要你",
     "sectionRunning": "运行中",
-    "backgroundTasksTooltip": "后台运行中 {{count}} 个 agent"
+    "backgroundAgentsTooltip": "后台 agent ×{{count}}：{{names}}",
+    "backgroundCommandsTooltip": "后台命令 ×{{count}}：{{names}}"
   },
   "sidebar": {
     "workspaces": "工作区",

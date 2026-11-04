@@ -256,7 +256,8 @@
     "otherWindow": "{{name}} window",
     "sectionNeedsYou": "Needs you",
     "sectionRunning": "Running",
-    "backgroundTasksTooltip": "{{count}} background agent(s) running"
+    "backgroundAgentsTooltip": "Background agents ×{{count}}: {{names}}",
+    "backgroundCommandsTooltip": "Background commands ×{{count}}: {{names}}"
   },
 
   "sidebar": {

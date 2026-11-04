@@ -256,7 +256,8 @@
     "otherWindow": "{{name}} 視窗",
     "sectionNeedsYou": "需要你",
     "sectionRunning": "執行中",
-    "backgroundTasksTooltip": "背景執行中 {{count}} 個 agent"
+    "backgroundAgentsTooltip": "背景 agent ×{{count}}：{{names}}",
+    "backgroundCommandsTooltip": "背景指令 ×{{count}}：{{names}}"
   },
 
   "sidebar": {

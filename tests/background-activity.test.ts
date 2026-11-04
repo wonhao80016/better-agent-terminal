@@ -1,9 +1,10 @@
-// Background tasks that outlive the main turn: indicator state, the agent count
-// badge, the workspace-store mirror of the host list, and the Active Tasks bar.
+// Background tasks that outlive the main turn: indicator state, the background
+// count badge and tooltip, the workspace-store mirror of the host list, and the Active Tasks bar.
 
 import * as assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { readFileSync } from 'node:fs'
 import i18next from 'i18next'
 
 ;(globalThis as { window?: unknown }).window = {
@@ -14,6 +15,7 @@ import i18next from 'i18next'
 
 async function main() {
   const {
+    backgroundActivityTooltip,
     normalizeBackgroundTasks,
     resolveActivityDotState,
     sameBackgroundTasks,
@@ -25,6 +27,7 @@ async function main() {
     countForegroundRunning,
     liveBackgroundIds,
   } = await import('../renderer/src/lib/agent-task-tree.ts')
+  const fakeT = (key: string, options: { count: number; names: string }) => `${key}|${options.count}|${options.names}`
 
   // --- indicator precedence: active (yellow) > background (blue) > unread > inactive
   assert.equal(resolveActivityDotState({ isActive: true, backgroundCount: 2, hasUnread: true }), 'active')
@@ -43,31 +46,78 @@ async function main() {
   assert.deepEqual(tasks.map(t => t.isAgent), [true, false])
   assert.equal(normalizeBackgroundTasks([{ id: 'x' }])[0].isAgent, false, 'a missing flag is not an agent')
 
-  // Without background agents the snapshot is the latest activity time.
+  const emptyBackground = {
+    backgroundCount: 0, backgroundAgentCount: 0, backgroundAgentNames: '', backgroundCommandNames: '',
+  }
+  // Without background tasks the snapshot is the latest activity time.
   const idle = summarizeActivity([
     { lastActivityTime: 100 },
     { lastActivityTime: 300 },
     { lastActivityTime: undefined },
   ])
-  assert.deepEqual(idle, { lastActivityTime: 300, agentRunning: false, backgroundCount: 0, backgroundLabels: '' })
-  assert.deepEqual(summarizeActivity([]), { lastActivityTime: null, agentRunning: false, backgroundCount: 0, backgroundLabels: '' })
+  assert.deepEqual(idle, { lastActivityTime: 300, agentRunning: false, ...emptyBackground })
+  assert.deepEqual(summarizeActivity([]), { lastActivityTime: null, agentRunning: false, ...emptyBackground })
+  assert.equal(backgroundActivityTooltip(idle, fakeT), undefined)
+  assert.equal(resolveActivityDotState({ isActive: false, backgroundCount: idle.backgroundCount, hasUnread: true }), 'unread')
 
-  // A terminal with background agents ignores its own activity clock (subagent
-  // output keeps refreshing it) and counts as active only while its main agent runs.
+  // A terminal with background tasks ignores its own activity clock (background
+  // messages keep refreshing it) and counts as active only while its main agent runs.
   const busy = summarizeActivity([
     { lastActivityTime: 900, isAgentRunning: false, backgroundTasks: tasks },
     { lastActivityTime: 200 },
   ])
   assert.equal(busy.lastActivityTime, 200)
   assert.equal(busy.agentRunning, false)
-  assert.equal(busy.backgroundCount, 1, 'only agents count')
-  assert.equal(busy.backgroundLabels, 'research')
-  assert.equal(summarizeActivity([{ backgroundTasks: tasks, isAgentRunning: true }]).agentRunning, true)
+  assert.equal(busy.backgroundCount, 2, 'agents and shells both count')
+  assert.equal(busy.backgroundAgentCount, 1)
+  assert.equal(busy.backgroundAgentNames, 'research')
+  assert.equal(busy.backgroundCommandNames, 'local_bash')
+  assert.equal(backgroundActivityTooltip(busy, fakeT),
+    'notifications.backgroundAgentsTooltip|1|research\nnotifications.backgroundCommandsTooltip|1|local_bash')
+  assert.equal(resolveActivityDotState({ isActive: busy.agentRunning, backgroundCount: busy.backgroundCount, hasUnread: true }), 'background')
+  const mainRunning = summarizeActivity([{ backgroundTasks: tasks, isAgentRunning: true }])
+  assert.equal(mainRunning.agentRunning, true)
+  assert.equal(resolveActivityDotState({ isActive: mainRunning.agentRunning, backgroundCount: mainRunning.backgroundCount, hasUnread: false }), 'active',
+    'a running main agent stays yellow over background tasks')
 
-  // A dev server alone neither turns the dot blue nor hides the unread state.
-  const shellOnly = summarizeActivity([{ lastActivityTime: 700, backgroundTasks: [tasks[1]] }])
-  assert.deepEqual(shellOnly, { lastActivityTime: 700, agentRunning: false, backgroundCount: 0, backgroundLabels: '' })
-  assert.equal(resolveActivityDotState({ isActive: false, backgroundCount: shellOnly.backgroundCount, hasUnread: true }), 'unread')
+  // A background shell alone (release build, dev server) turns the dot blue with a count of 1.
+  const build = { id: 'b-2', type: 'local_bash', description: 'cargo build --release', toolUseId: 'tu-b', startedAt: 30, isAgent: false }
+  const shellOnly = summarizeActivity([{ lastActivityTime: 700, isAgentRunning: false, backgroundTasks: [build] }])
+  assert.deepEqual(shellOnly, {
+    lastActivityTime: null, agentRunning: false,
+    backgroundCount: 1, backgroundAgentCount: 0, backgroundAgentNames: '', backgroundCommandNames: 'cargo build --release',
+  })
+  assert.equal(resolveActivityDotState({ isActive: false, backgroundCount: shellOnly.backgroundCount, hasUnread: true }), 'background')
+  assert.equal(backgroundActivityTooltip(shellOnly, fakeT), 'notifications.backgroundCommandsTooltip|1|cargo build --release')
+
+  // Workspace totals add up across terminals; long name lists are cut with +K.
+  const shells = ['a', 'b', 'c', 'd', 'e'].map((name, index) => ({ ...build, id: `s-${name}`, description: name, startedAt: index }))
+  const workspace = summarizeActivity([
+    { backgroundTasks: shells.slice(0, 2) },
+    { backgroundTasks: [...shells.slice(2), tasks[0]] },
+  ])
+  assert.equal(workspace.backgroundCount, 6)
+  assert.equal(workspace.backgroundAgentCount, 1)
+  assert.equal(workspace.backgroundCommandNames, 'a, b, c +2')
+
+  const locales = Object.fromEntries(['en', 'zh-TW', 'zh-CN', 'ja'].map(lng => [
+    lng,
+    JSON.parse(readFileSync(new URL(`../renderer/src/locales/${lng}.json`, import.meta.url), 'utf8')),
+  ]))
+  const localeI18n = i18next.createInstance()
+  await localeI18n.init({
+    lng: 'en',
+    resources: Object.fromEntries(Object.entries(locales).map(([lng, translation]) => [lng, { translation }])),
+    interpolation: { escapeValue: false },
+  })
+  for (const lng of Object.keys(locales)) {
+    const tooltip = backgroundActivityTooltip(summarizeActivity([{ backgroundTasks: [tasks[0], build] }]), localeI18n.getFixedT(lng))
+    const lines = tooltip?.split('\n') ?? []
+    assert.equal(lines.length, 2, `${lng}: one line per group`)
+    assert.match(lines[0], /×1.*research$/, `${lng}: agent group`)
+    assert.match(lines[1], /×1.*cargo build --release$/, `${lng}: command group`)
+    assert.ok(!tooltip?.includes('notifications.'), `${lng}: keys resolve`)
+  }
 
   assert.equal(sameBackgroundTasks(undefined, []), true)
   assert.equal(sameBackgroundTasks(tasks, normalizeBackgroundTasks(JSON.parse(JSON.stringify(tasks)))), true)

@@ -6,6 +6,7 @@ import { shallowEqual } from '../stores/use-store'
 import { workspaceHasUnreadCompletion } from '../utils/attention'
 import {
   ACTIVITY_WINDOW_MS,
+  backgroundActivityTooltip,
   resolveActivityDotState,
   summarizeActivity,
   type ActivitySnapshot,
@@ -48,7 +49,9 @@ export function ActivityIndicator({
         lastActivityTime: propActivityTime ?? null,
         agentRunning: false,
         backgroundCount: 0,
-        backgroundLabels: '',
+        backgroundAgentCount: 0,
+        backgroundAgentNames: '',
+        backgroundCommandNames: '',
         hasPending: false,
       }
     },
@@ -92,9 +95,7 @@ export function ActivityIndicator({
   const showBackgroundCount = !activityData.hasPending && backgroundCount > 0
   const className = `activity-indicator ${size} ${stateClass}`
     + `${activityData.hasPending ? ' pending' : ''}${showBackgroundCount ? ' has-bg-count' : ''}`
-  const title = backgroundCount > 0
-    ? `${t('notifications.backgroundTasksTooltip', { count: backgroundCount })}\n${activityData.backgroundLabels}`
-    : undefined
+  const title = backgroundActivityTooltip(activityData, t)
 
   return (
     <div className={className} title={title}>
