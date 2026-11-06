@@ -5,6 +5,8 @@ import { MarkdownPreview } from './MarkdownPreview'
 import { CsvPreview } from './CsvPreview'
 import { HtmlPreview } from './HtmlPreview'
 import { CopyContentButton } from './CopyContentButton'
+import { ResizeHandle } from './ResizeHandle'
+import { useResizablePaneWidth } from '../hooks/useResizablePaneWidth'
 import { isProcfileName } from '../utils/procfile-parser'
 import { formatErrorMessage } from '../utils/error-message'
 import { canPreview, getFileExt, getRichPreviewKind, isScriptFile } from '../utils/file-preview'
@@ -439,6 +441,8 @@ export function FileTree({ rootPath, remoteMode = false }: Readonly<FileTreeProp
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const listRef = useRef<HTMLDivElement>(null)
+  const splitRef = useRef<HTMLDivElement>(null)
+  const treePane = useResizablePaneWidth(splitRef, 'better-terminal-file-tree-width', 35, 15, 80)
   const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const loadRoot = useCallback(async () => {
@@ -796,8 +800,8 @@ export function FileTree({ rootPath, remoteMode = false }: Readonly<FileTreeProp
   const displayEntries = searchResults !== null ? searchResults : entries
 
   return (
-    <div className="file-tree-split">
-      <div className="file-tree">
+    <div className="file-tree-split" ref={splitRef}>
+      <div className="file-tree" style={treePane.style}>
         <div className="file-tree-header">
           <input
             ref={searchInputRef}
@@ -893,6 +897,7 @@ export function FileTree({ rootPath, remoteMode = false }: Readonly<FileTreeProp
           )}
         </div>
       </div>
+      <ResizeHandle direction="horizontal" onResize={treePane.resize} onDoubleClick={treePane.reset} />
       <div className="file-preview">
         {selectedFile ? (
           <>

@@ -1,7 +1,10 @@
 import { host } from '../host-api'
-import { useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
+import { ResizeHandle } from './ResizeHandle'
+import { useResizablePaneWidth } from '../hooks/useResizablePaneWidth'
+import { getFileChangeMarkers, parseUnifiedDiff, type DiffRow } from '../utils/unified-diff'
 
 interface GitCommit {
   hash: string
@@ -71,30 +74,71 @@ function statusColor(s: string): string {
   }
 }
 
+function DiffCode({ row }: { row: DiffRow }) {
+  if ((row.kind !== 'add' && row.kind !== 'del') || !row.segments) return <>{row.text || ' '}</>
+  const changedClass = row.kind === 'add' ? 'git-diff-word-add' : 'git-diff-word-del'
+  return (
+    <>
+      {row.segments.map((segment, i) => segment.changed
+        ? <span key={i} className={changedClass}>{segment.text}</span>
+        : <Fragment key={i}>{segment.text}</Fragment>)}
+    </>
+  )
+}
+
+const DIFF_SIGN: Record<DiffRow['kind'], string> = { add: '+', del: '−', context: '', hunk: '', meta: '' }
+
 function DiffView({ diff }: { diff: string }) {
   const { t } = useTranslation()
+  const rows = useMemo(() => parseUnifiedDiff(diff), [diff])
   if (!diff) {
     return <div className="git-diff-empty">{t('git.selectFileToViewDiff')}</div>
   }
 
-  const lines = diff.split('\n')
+  const maxLine = rows.reduce((max, row) => 'oldLine' in row || 'newLine' in row
+    ? Math.max(max, row.oldLine ?? 0, row.newLine ?? 0)
+    : max, 0)
 
   return (
-    <pre className="git-diff-content">
-      {lines.map((line, i) => {
-        let className = 'git-diff-line'
-        if (line.startsWith('+') && !line.startsWith('+++')) {
-          className += ' git-diff-add'
-        } else if (line.startsWith('-') && !line.startsWith('---')) {
-          className += ' git-diff-del'
-        } else if (line.startsWith('@@')) {
-          className += ' git-diff-hunk'
-        } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
-          className += ' git-diff-header'
-        }
-        return <div key={i} className={className}>{line || ' '}</div>
-      })}
-    </pre>
+    <div className="git-diff-content" style={lineNumberGutter(maxLine)}>
+      <div className="git-diff-rows">
+        {rows.map((row, i) => (
+          <div key={i} className={`git-diff-row git-diff-row-${row.kind}`}>
+            <span className="git-diff-ln">{'oldLine' in row ? row.oldLine : ''}</span>
+            <span className="git-diff-ln">{'newLine' in row ? row.newLine : ''}</span>
+            <span className="git-diff-sign">{DIFF_SIGN[row.kind]}</span>
+            <span className="git-diff-code"><DiffCode row={row} /></span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function lineNumberGutter(maxLine: number): CSSProperties {
+  return { '--git-diff-ln-width': `${Math.max(2, String(maxLine).length)}ch` } as CSSProperties
+}
+
+function newFileDiff(filePath: string, content: string): string {
+  const contentLines = content.replace(/\r?\n$/, '').split('\n')
+  const lines = contentLines.map(line => '+' + line).join('\n')
+  return `diff --git a/${filePath} b/${filePath}\nnew file\n--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${contentLines.length} @@\n${lines}`
+}
+
+function FileContentView({ content, diff }: { content: string; diff: string }) {
+  const lines = useMemo(() => content.replace(/\r?\n$/, '').split('\n').map(line => line.replace(/\r$/, '')), [content])
+  const markers = useMemo(() => getFileChangeMarkers(content, diff), [content, diff])
+  return (
+    <div className="git-file-content" style={lineNumberGutter(lines.length)}>
+      <div className="git-diff-rows">
+        {lines.map((line, i) => (
+          <div key={i} className={`git-diff-row${markers.has(i + 1) ? ` git-file-row-${markers.get(i + 1)}` : ''}`}>
+            <span className="git-diff-ln">{i + 1}</span>
+            <span className="git-diff-code">{line || ' '}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -106,6 +150,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const [changedFiles, setChangedFiles] = useState<GitStatusEntry[]>([])
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [diff, setDiff] = useState('')
+  const [fileDiff, setFileDiff] = useState('')
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'diff' | 'file'>('diff')
   const [loading, setLoading] = useState(true)
@@ -114,6 +159,9 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const [isGitRepo, setIsGitRepo] = useState(true)
   const [gitRoot, setGitRoot] = useState<string | null>(null)
   const [activePath, setActivePath] = useState(workspaceFolderPath)
+  const columnsRef = useRef<HTMLDivElement>(null)
+  const commitPane = useResizablePaneWidth(columnsRef, 'better-terminal-git-commit-width', 28, 10, 50)
+  const filePane = useResizablePaneWidth(columnsRef, 'better-terminal-git-file-width', 22, 10, 40)
 
   // Build path options: main + worktrees
   const pathOptions = [
@@ -128,6 +176,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     setChangedFiles([])
     setSelectedFile(null)
     setDiff('')
+    setFileDiff('')
     try {
       const [logResult, statusResult, branch, root] = await Promise.all([
         host.git.getLog(activePath),
@@ -153,6 +202,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     setSelectedCommit(hash)
     setSelectedFile(null)
     setDiff('')
+    setFileDiff('')
     setFilesLoading(true)
     try {
       if (hash === 'working') {
@@ -171,6 +221,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     setSelectedFile(filePath)
     setViewMode('diff')
     setFileContent(null)
+    setFileDiff('')
     setDiffLoading(true)
     try {
       const d = await host.git.getDiff(activePath, selectedCommit || undefined, filePath)
@@ -185,8 +236,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
           const fullPath = base + sep + filePath.replace(/[/\\]/g, sep)
           const result = await host.fs.readFile(fullPath)
           if (result.content) {
-            const lines = result.content.split('\n').map(l => '+' + l).join('\n')
-            setDiff(`diff --git a/${filePath} b/${filePath}\nnew file\n--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${result.content.split('\n').length} @@\n${lines}`)
+            setDiff(newFileDiff(filePath, result.content))
           } else {
             setDiff(result.error || '')
           }
@@ -203,13 +253,32 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const handleViewFile = useCallback(async () => {
     if (!selectedFile) return
     setViewMode('file')
-    if (fileContent !== null) return // already loaded
+    setDiffLoading(true)
+    setFileContent(null)
+    setFileDiff('')
     const base = gitRoot || activePath
     const sep = host.platform === 'win32' ? '\\' : '/'
     const fullPath = base + sep + selectedFile.replace(/[/\\]/g, sep)
-    const result = await host.fs.readFile(fullPath)
-    setFileContent(result.content || result.error || 'Unable to read file')
-  }, [selectedFile, fileContent, activePath, gitRoot])
+    try {
+      const result = await host.fs.readFile(fullPath)
+      if (selectedCommit === 'working' && result.content !== undefined) {
+        const latestDiff = await host.git.getDiff(activePath, selectedCommit, selectedFile)
+        const recheck = await host.fs.readFile(fullPath)
+        const fileEntry = changedFiles.find(file => file.file === selectedFile)
+        const currentDiff = latestDiff.trim() ? latestDiff : fileEntry && (fileEntry.status === '??' || fileEntry.status === 'A') && recheck.content !== undefined
+          ? newFileDiff(selectedFile, recheck.content) : ''
+        setDiff(currentDiff)
+        setFileDiff(result.content === recheck.content ? currentDiff : '')
+        setFileContent(recheck.content ?? recheck.error ?? 'Unable to read file')
+      } else {
+        setFileContent(result.content ?? result.error ?? 'Unable to read file')
+      }
+    } catch {
+      setFileContent('Unable to read file')
+      setDiff('')
+    }
+    setDiffLoading(false)
+  }, [selectedFile, selectedCommit, changedFiles, activePath, gitRoot])
 
   if (loading) {
     return <div className="git-panel-empty">{t('common.loading')}</div>
@@ -234,9 +303,9 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
           ))}
         </div>
       )}
-      <div className="git-panel-columns">
+      <div className="git-panel-columns" ref={columnsRef}>
       {/* Column 1: Commit log */}
-      <div className="git-commit-list">
+      <div className="git-commit-list" style={commitPane.style}>
         <div className="git-col-header">
           <span>{t('git.commits')}</span>
           <button className="git-refresh-btn" onClick={loadData} title={t('git.refresh')}>↻</button>
@@ -276,8 +345,10 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
         </div>
       </div>
 
+      <ResizeHandle direction="horizontal" onResize={commitPane.resize} onDoubleClick={commitPane.reset} />
+
       {/* Column 2: Changed files */}
-      <div className="git-file-list">
+      <div className="git-file-list" style={filePane.style}>
         <div className="git-col-header">
           <span>{t('git.files')}</span>
           {changedFiles.length > 0 && (
@@ -314,6 +385,8 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
         </div>
       </div>
 
+      <ResizeHandle direction="horizontal" onResize={filePane.resize} onDoubleClick={filePane.reset} />
+
       {/* Column 3: Diff / File preview */}
       <div className="git-diff-view">
         {selectedFile && isTextFile(selectedFile.split('/').pop() || '') && (
@@ -335,7 +408,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
         {diffLoading ? (
           <div className="git-diff-empty">{t('common.loading')}</div>
         ) : viewMode === 'file' && fileContent !== null ? (
-          <pre className="git-file-content">{fileContent}</pre>
+          <FileContentView content={fileContent} diff={fileDiff} />
         ) : (
           <DiffView diff={diff} />
         )}

@@ -512,33 +512,77 @@
 
 .git-diff-content {
   margin: 0;
-  padding: 4px 8px;
   font-size: 11px;
   font-family: monospace;
   line-height: 1.5;
   white-space: pre;
+  color: var(--text-primary);
+}
+
+.git-diff-rows {
+  width: max-content;
+  min-width: 100%;
+  padding: 4px 0;
+}
+
+.git-diff-row {
+  display: flex;
+  min-height: 1.5em;
+}
+
+.git-diff-ln {
+  flex: 0 0 auto;
+  width: var(--git-diff-ln-width, 3ch);
+  padding: 0 6px;
+  box-sizing: content-box;
+  text-align: right;
   color: var(--text-secondary);
+  opacity: 0.7;
+  user-select: none;
 }
 
-.git-diff-line {
-  min-height: 1em;
+.git-diff-sign {
+  flex: 0 0 auto;
+  width: 2ch;
+  text-align: center;
+  user-select: none;
 }
 
-.git-diff-add {
-  color: #4ec9b0;
-  background: rgba(78, 201, 176, 0.08);
+.git-diff-code {
+  flex: 1 0 auto;
+  padding-right: 12px;
 }
 
-.git-diff-del {
+.git-diff-row-add {
+  background: rgba(155, 185, 85, 0.2);
+}
+
+.git-diff-row-del {
+  background: rgba(255, 0, 0, 0.2);
+}
+
+.git-diff-row-add .git-diff-sign {
+  color: #9bb955;
+}
+
+.git-diff-row-del .git-diff-sign {
   color: #f44336;
-  background: rgba(244, 67, 54, 0.08);
 }
 
-.git-diff-hunk {
+.git-diff-word-add {
+  background: rgba(156, 204, 44, 0.35);
+}
+
+.git-diff-word-del {
+  background: rgba(255, 0, 0, 0.4);
+}
+
+.git-diff-row-hunk {
   color: #569cd6;
+  background: rgba(86, 156, 214, 0.08);
 }
 
-.git-diff-header {
+.git-diff-row-meta {
   color: var(--text-secondary);
   opacity: 0.7;
 }
@@ -579,13 +623,32 @@
 
 .git-file-content {
   margin: 0;
-  padding: 8px 12px;
   font-size: 12px;
   font-family: monospace;
   line-height: 1.5;
   white-space: pre;
   color: var(--text-primary);
   tab-size: 2;
+}
+
+.git-file-row-add {
+  background: rgba(155, 185, 85, 0.15);
+}
+
+.git-file-row-modified {
+  background: rgba(86, 156, 214, 0.15);
+}
+
+.git-file-row-add .git-diff-ln {
+  box-shadow: inset 3px 0 #9bb955;
+}
+
+.git-file-row-modified .git-diff-ln {
+  box-shadow: inset 3px 0 #569cd6;
+}
+
+.git-file-row-deleted .git-diff-ln {
+  box-shadow: inset 3px 0 #f44336;
 }
 
 /* Markdown preview mode toggle */
