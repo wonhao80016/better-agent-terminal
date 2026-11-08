@@ -536,6 +536,8 @@
     "selectFileToViewDiff": "选择文件以查看差异",
     "diff": "差异",
     "file": "文件",
+    "previousChange": "上一个修改",
+    "nextChange": "下一个修改",
     "justNow": "刚才",
     "minutesAgo": "{{count}} 分钟前",
     "hoursAgo": "{{count}} 小时前",

@@ -543,6 +543,8 @@
     "selectFileToViewDiff": "差分を表示するファイルを選択",
     "diff": "差分",
     "file": "ファイル",
+    "previousChange": "前の変更",
+    "nextChange": "次の変更",
     "justNow": "たった今",
     "minutesAgo": "{{count}} 分前",
     "hoursAgo": "{{count}} 時間前",

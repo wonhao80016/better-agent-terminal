@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
 import { ResizeHandle } from './ResizeHandle'
 import { useResizablePaneWidth } from '../hooks/useResizablePaneWidth'
-import { getFileChangeMarkers, parseUnifiedDiff, type DiffRow } from '../utils/unified-diff'
+import { buildInlineFileRows, changeBlockEnd, changeBlockStarts, parseUnifiedDiff, splitContentLines, type DiffRow } from '../utils/unified-diff'
 
 interface GitCommit {
   hash: string
@@ -88,6 +88,37 @@ function DiffCode({ row }: { row: DiffRow }) {
 
 const DIFF_SIGN: Record<DiffRow['kind'], string> = { add: '+', del: '−', context: '', hunk: '', meta: '' }
 
+interface ChangeFocus {
+  start: number
+  end: number
+  seq: number
+}
+
+function DiffRowList({ rows, focus = null }: { rows: DiffRow[]; focus?: ChangeFocus | null }) {
+  return (
+    <div className="git-diff-rows">
+      {rows.map((row, i) => {
+        const focused = focus !== null && i >= focus.start && i < focus.end
+        return (
+          // Keying focused rows by seq remounts them so the flash restarts on every navigation.
+          <div key={focused ? `${i}-${focus.seq}` : i} className={`git-diff-row git-diff-row-${row.kind}${focused ? ' git-diff-row-focus' : ''}`}>
+            <span className="git-diff-ln">{'oldLine' in row ? row.oldLine : ''}</span>
+            <span className="git-diff-ln">{'newLine' in row ? row.newLine : ''}</span>
+            <span className="git-diff-sign">{DIFF_SIGN[row.kind]}</span>
+            <span className="git-diff-code"><DiffCode row={row} /></span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function maxLineNumber(rows: DiffRow[]): number {
+  return rows.reduce((max, row) => 'oldLine' in row || 'newLine' in row
+    ? Math.max(max, row.oldLine ?? 0, row.newLine ?? 0)
+    : max, 0)
+}
+
 function DiffView({ diff }: { diff: string }) {
   const { t } = useTranslation()
   const rows = useMemo(() => parseUnifiedDiff(diff), [diff])
@@ -95,22 +126,9 @@ function DiffView({ diff }: { diff: string }) {
     return <div className="git-diff-empty">{t('git.selectFileToViewDiff')}</div>
   }
 
-  const maxLine = rows.reduce((max, row) => 'oldLine' in row || 'newLine' in row
-    ? Math.max(max, row.oldLine ?? 0, row.newLine ?? 0)
-    : max, 0)
-
   return (
-    <div className="git-diff-content" style={lineNumberGutter(maxLine)}>
-      <div className="git-diff-rows">
-        {rows.map((row, i) => (
-          <div key={i} className={`git-diff-row git-diff-row-${row.kind}`}>
-            <span className="git-diff-ln">{'oldLine' in row ? row.oldLine : ''}</span>
-            <span className="git-diff-ln">{'newLine' in row ? row.newLine : ''}</span>
-            <span className="git-diff-sign">{DIFF_SIGN[row.kind]}</span>
-            <span className="git-diff-code"><DiffCode row={row} /></span>
-          </div>
-        ))}
-      </div>
+    <div className="git-diff-content" style={lineNumberGutter(maxLineNumber(rows))}>
+      <DiffRowList rows={rows} />
     </div>
   )
 }
@@ -125,20 +143,45 @@ function newFileDiff(filePath: string, content: string): string {
   return `diff --git a/${filePath} b/${filePath}\nnew file\n--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${contentLines.length} @@\n${lines}`
 }
 
-function FileContentView({ content, diff }: { content: string; diff: string }) {
-  const lines = useMemo(() => content.replace(/\r?\n$/, '').split('\n').map(line => line.replace(/\r$/, '')), [content])
-  const markers = useMemo(() => getFileChangeMarkers(content, diff), [content, diff])
+function FileContentView({ content, rows, focus }: { content: string; rows: DiffRow[] | null; focus: ChangeFocus | null }) {
+  const plainLines = useMemo(() => rows ? [] : splitContentLines(content), [rows, content])
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const container = containerRef.current
+    const target = container?.querySelector<HTMLElement>('.git-diff-row-focus')
+    if (!container || !target) return
+    const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+    container.scrollTop = top - container.clientHeight / 3
+  }, [focus])
+
+  if (rows) {
+    return (
+      <div className="git-file-content" ref={containerRef} style={lineNumberGutter(maxLineNumber(rows))}>
+        <DiffRowList rows={rows} focus={focus} />
+      </div>
+    )
+  }
+
   return (
-    <div className="git-file-content" style={lineNumberGutter(lines.length)}>
+    <div className="git-file-content" style={lineNumberGutter(plainLines.length)}>
       <div className="git-diff-rows">
-        {lines.map((line, i) => (
-          <div key={i} className={`git-diff-row${markers.has(i + 1) ? ` git-file-row-${markers.get(i + 1)}` : ''}`}>
+        {plainLines.map((line, i) => (
+          <div key={i} className="git-diff-row">
             <span className="git-diff-ln">{i + 1}</span>
             <span className="git-diff-code">{line || ' '}</span>
           </div>
         ))}
       </div>
     </div>
+  )
+}
+
+function ArrowIcon({ direction }: { direction: 'up' | 'down' }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={direction === 'up' ? 'M8 13V3M4 7l4-4 4 4' : 'M8 3v10M4 9l4 4 4-4'} />
+    </svg>
   )
 }
 
@@ -162,6 +205,22 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const columnsRef = useRef<HTMLDivElement>(null)
   const commitPane = useResizablePaneWidth(columnsRef, 'better-terminal-git-commit-width', 28, 10, 50)
   const filePane = useResizablePaneWidth(columnsRef, 'better-terminal-git-file-width', 22, 10, 40)
+  const fileRows = useMemo(() => fileContent === null ? null : buildInlineFileRows(fileContent, fileDiff), [fileContent, fileDiff])
+  const changeStarts = useMemo(() => fileRows ? changeBlockStarts(fileRows) : [], [fileRows])
+  const [changeNav, setChangeNav] = useState<{ rows: DiffRow[]; index: number; seq: number } | null>(null)
+  const activeChangeNav = changeNav && changeNav.rows === fileRows ? changeNav : null
+  const changeFocus = useMemo<ChangeFocus | null>(() => {
+    if (!activeChangeNav || !fileRows) return null
+    const start = changeStarts[activeChangeNav.index]
+    return { start, end: changeBlockEnd(fileRows, start), seq: activeChangeNav.seq }
+  }, [activeChangeNav, fileRows, changeStarts])
+
+  const stepChange = (delta: 1 | -1) => {
+    const count = changeStarts.length
+    if (!fileRows || count === 0) return
+    const index = activeChangeNav ? (activeChangeNav.index + delta + count) % count : delta > 0 ? 0 : count - 1
+    setChangeNav({ rows: fileRows, index, seq: (changeNav?.seq ?? 0) + 1 })
+  }
 
   // Build path options: main + worktrees
   const pathOptions = [
@@ -391,24 +450,53 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
       <div className="git-diff-view">
         {selectedFile && isTextFile(selectedFile.split('/').pop() || '') && (
           <div className="git-diff-mode-bar">
-            <button
-              className={`git-diff-mode-btn ${viewMode === 'diff' ? 'active' : ''}`}
-              onClick={() => setViewMode('diff')}
-            >
-              {t('git.diff')}
-            </button>
-            <button
-              className={`git-diff-mode-btn ${viewMode === 'file' ? 'active' : ''}`}
-              onClick={handleViewFile}
-            >
-              {t('git.file')}
-            </button>
+            <div className="git-diff-mode-toggle">
+              <button
+                className={`git-diff-mode-btn ${viewMode === 'diff' ? 'active' : ''}`}
+                onClick={() => setViewMode('diff')}
+              >
+                {t('git.diff')}
+              </button>
+              <button
+                className={`git-diff-mode-btn ${viewMode === 'file' ? 'active' : ''}`}
+                onClick={handleViewFile}
+              >
+                {t('git.file')}
+              </button>
+            </div>
+            {viewMode === 'file' && (
+              <div className="git-change-nav">
+                <span className="git-change-nav-count">
+                  {activeChangeNav ? activeChangeNav.index + 1 : '–'} / {changeStarts.length}
+                </span>
+                <button
+                  type="button"
+                  className="git-change-nav-btn"
+                  onClick={() => stepChange(-1)}
+                  disabled={changeStarts.length === 0}
+                  title={t('git.previousChange')}
+                  aria-label={t('git.previousChange')}
+                >
+                  <ArrowIcon direction="up" />
+                </button>
+                <button
+                  type="button"
+                  className="git-change-nav-btn"
+                  onClick={() => stepChange(1)}
+                  disabled={changeStarts.length === 0}
+                  title={t('git.nextChange')}
+                  aria-label={t('git.nextChange')}
+                >
+                  <ArrowIcon direction="down" />
+                </button>
+              </div>
+            )}
           </div>
         )}
         {diffLoading ? (
           <div className="git-diff-empty">{t('common.loading')}</div>
         ) : viewMode === 'file' && fileContent !== null ? (
-          <FileContentView content={fileContent} diff={fileDiff} />
+          <FileContentView content={fileContent} rows={fileRows} focus={changeFocus} />
         ) : (
           <DiffView diff={diff} />
         )}

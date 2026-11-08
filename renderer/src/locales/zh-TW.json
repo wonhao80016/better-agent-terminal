@@ -560,6 +560,8 @@
     "selectFileToViewDiff": "選擇檔案以查看差異",
     "diff": "差異",
     "file": "檔案",
+    "previousChange": "上一個修改",
+    "nextChange": "下一個修改",
     "justNow": "剛才",
     "minutesAgo": "{{count}} 分鐘前",
     "hoursAgo": "{{count}} 小時前",
