@@ -7,25 +7,28 @@ export interface GraphLogResult {
   scope: GitGraphScope
 }
 
+export interface GraphLoadOptions {
+  retryCurrent?: boolean
+  rememberFailure?: boolean
+}
+
 export interface GraphLogSource {
-  /** Resolves null when no graph can be shown; never rejects. */
-  load(cwd: string, scope: GitGraphScope, count: number): Promise<GraphLogResult | null>
-  /** Allows a failed path (and scope) to be retried. */
+  // Resolves null when no graph can be shown; never rejects.
+  load(cwd: string, scope: GitGraphScope, count: number, options?: GraphLoadOptions): Promise<GraphLogResult | null>
+  // Allows a failed path (and scope) to be retried.
   forget(cwd: string, scope?: GitGraphScope): void
 }
 
-/**
- * A failed path + scope is not retried until `forget`, so a repo that times
- * out or a remote host without the graph channel is asked at most once.
- */
+// A remembered failure skips that path + scope until `forget`, so a repo that
+// times out or a remote host without the graph channel is asked only once.
 export function createGraphLogSource(fetchLog: GraphLogFetcher, logFailure: (message: string) => void): GraphLogSource {
   const failed = new Set<string>()
   const logged = new Set<string>()
   const keyOf = (cwd: string, scope: GitGraphScope) => `${scope}\u0000${cwd}`
 
-  async function attempt(cwd: string, scope: GitGraphScope, count: number): Promise<GitGraphCommit[] | null> {
+  async function attempt(cwd: string, scope: GitGraphScope, count: number, rememberFailure: boolean): Promise<GitGraphCommit[] | null> {
     const key = keyOf(cwd, scope)
-    if (failed.has(key)) return null
+    if (rememberFailure && failed.has(key)) return null
     let reason = 'unavailable'
     try {
       const commits = await fetchLog(cwd, count, scope)
@@ -33,20 +36,24 @@ export function createGraphLogSource(fetchLog: GraphLogFetcher, logFailure: (mes
     } catch (error) {
       reason = `failed: ${error instanceof Error ? error.message : String(error)}`
     }
-    failed.add(key)
+    if (rememberFailure) failed.add(key)
     if (!logged.has(key)) {
       logged.add(key)
-      logFailure(`[git-graph] graph log ${reason} (scope=${scope}, cwd=${cwd}); showing the plain commit list`)
+      try {
+        logFailure(`[git-graph] graph log ${reason} (scope=${scope}, cwd=${cwd}); showing the plain commit list`)
+      } catch {
+        // Logging is best effort; load() must still resolve.
+      }
     }
     return null
   }
 
   return {
-    async load(cwd, scope, count) {
-      const commits = await attempt(cwd, scope, count)
+    async load(cwd, scope, count, { retryCurrent = true, rememberFailure = true } = {}) {
+      const commits = await attempt(cwd, scope, count, rememberFailure)
       if (commits) return { commits, scope }
-      if (scope === 'current') return null
-      const fallback = await attempt(cwd, 'current', count)
+      if (scope === 'current' || !retryCurrent) return null
+      const fallback = await attempt(cwd, 'current', count, rememberFailure)
       return fallback ? { commits: fallback, scope: 'current' } : null
     },
     forget(cwd, scope) {

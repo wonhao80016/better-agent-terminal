@@ -52,10 +52,8 @@ interface Track {
   virtual: boolean
 }
 
-/**
- * Lays out commit lanes for rows in display order, where every child precedes
- * its parents (`git log --date-order`). See docs/git-graph/plan.md, section 5.4.
- */
+// Rows must list every child before its parents (`git log --date-order`).
+// The lane rules are specified in docs/git-graph/plan.md, section 5.4.
 export function computeGitGraph(rows: readonly GraphInputRow[]): GraphLayout {
   let lanes: Track[] = []
   let colorCounter = 0
@@ -90,7 +88,8 @@ export function computeGitGraph(rows: readonly GraphInputRow[]): GraphLayout {
       outgoing.push({ slot: lane, color, dashed: virtual })
     }
     for (const parent of otherParents) {
-      let slot = slots.findIndex(track => track !== null && track.hash === parent)
+      // A merge never joins the uncommitted row's lane, even when both lead to HEAD.
+      let slot = slots.findIndex(track => track !== null && !track.virtual && track.hash === parent)
       if (slot < 0) {
         slot = slots.indexOf(null)
         if (slot < 0) slot = slots.push(null) - 1

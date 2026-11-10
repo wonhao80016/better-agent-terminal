@@ -305,13 +305,15 @@ pub fn build_graph_log_args(count: Option<i64>, scope: Option<&str>) -> Vec<Stri
         "--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s".into(),
         "-n".into(),
         clamp_log_count(count).to_string(),
+        // Must precede the revisions; it lets an unborn HEAD log nothing instead of failing.
+        "--ignore-missing".into(),
     ];
     if scope == Some("all") {
-        // `--ignore-missing` only applies to revisions that follow it.
-        for arg in ["--ignore-missing", "--branches", "--remotes", "--tags", "HEAD"] {
+        for arg in ["--branches", "--remotes", "--tags"] {
             args.push(arg.into());
         }
     }
+    args.push("HEAD".into());
     args.push("--".into());
     args
 }
@@ -650,6 +652,8 @@ mod tests {
                 "--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s",
                 "-n",
                 "50",
+                "--ignore-missing",
+                "HEAD",
                 "--",
             ]
         );
@@ -765,6 +769,7 @@ mod tests {
             .map(|status| status.success())
             .unwrap_or(false);
         if !git_available {
+            eprintln!("skipping: git is not installed on this machine");
             return;
         }
         let nanos = std::time::SystemTime::now()

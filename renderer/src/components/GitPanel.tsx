@@ -284,7 +284,16 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
 
   const applyGraph = useCallback((result: GraphLogResult | null) => {
     setGraph(result)
-    if (result) graphScopeRef.current = result.scope
+    if (!result) return
+    graphScopeRef.current = result.scope
+    const selected = selectedCommitRef.current
+    if (selected && selected !== 'working' && !result.commits.some(commit => commit.hash === selected)) {
+      setSelectedCommit(null)
+      setChangedFiles([])
+      setSelectedFile(null)
+      setDiff('')
+      setFileDiff('')
+    }
   }, [])
 
   const loadData = useCallback(async () => {
@@ -332,25 +341,20 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     loadData()
   }, [loadData])
 
-  const reloadGraph = useCallback(async (scope: GitGraphScope, count: number, persistScope: boolean) => {
+  const reloadGraph = useCallback(async (scope: GitGraphScope, count: number, options: { persistScope: boolean; extendOnly: boolean }) => {
     const graphId = ++graphRequestRef.current
     setGraphBusy(true)
-    const result = await graphLogSource.load(activePath, scope, count)
+    // Loading more must neither switch scope nor mark a scope that works at the current count as failed.
+    const result = await graphLogSource.load(activePath, scope, count, options.extendOnly
+      ? { retryCurrent: false, rememberFailure: false }
+      : undefined)
     if (graphId !== graphRequestRef.current) return
     setGraphBusy(false)
     if (!result) return
-    if (persistScope && result.scope === scope) writeStoredGraphScope(scope)
+    if (options.persistScope && result.scope === scope) writeStoredGraphScope(scope)
     graphCountRef.current = count
     setGraphCount(count)
     applyGraph(result)
-    const selected = selectedCommitRef.current
-    if (selected && selected !== 'working' && !result.commits.some(commit => commit.hash === selected)) {
-      setSelectedCommit(null)
-      setChangedFiles([])
-      setSelectedFile(null)
-      setDiff('')
-      setFileDiff('')
-    }
   }, [activePath, applyGraph])
 
   const handleRefresh = useCallback(() => {
@@ -362,12 +366,13 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     if (!graph) return
     const nextScope: GitGraphScope = graph.scope === 'all' ? 'current' : 'all'
     graphLogSource.forget(activePath, nextScope)
-    reloadGraph(nextScope, graphCountRef.current, true)
+    reloadGraph(nextScope, graphCountRef.current, { persistScope: true, extendOnly: false })
   }, [graph, activePath, reloadGraph])
 
   const handleLoadMore = useCallback(() => {
     if (!graph) return
-    reloadGraph(graph.scope, Math.min(graphCountRef.current + GRAPH_PAGE_SIZE, GRAPH_MAX_COUNT), false)
+    const count = Math.min(graphCountRef.current + GRAPH_PAGE_SIZE, GRAPH_MAX_COUNT)
+    reloadGraph(graph.scope, count, { persistScope: false, extendOnly: true })
   }, [graph, reloadGraph])
 
   const graphLayout = useMemo(() => {

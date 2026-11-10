@@ -10,6 +10,7 @@ import {
   type GitGraphCommit,
   type GitGraphRef,
   type GraphInputRow,
+  type GraphLayout,
   type GraphLine,
 } from '../renderer/src/lib/git-graph'
 import { createGraphLogSource } from '../renderer/src/lib/git-graph-source'
@@ -37,6 +38,89 @@ function sortedLines(lines: GraphLine[]): GraphLine[] {
 
 function assertLines(actual: GraphLine[], expected: GraphLine[], label: string) {
   assert.deepEqual(sortedLines(actual), sortedLines(expected), label)
+}
+
+// Structural invariants that every layout must satisfy:
+// - each lane leaving the bottom of a row enters the top of the next row, with
+//   the same color and dash style for every line that meets at that lane;
+// - a commit has an incoming line exactly when a loaded row above leads to it;
+// - real commits never draw the uncommitted row's color;
+// - every lane index fits inside laneCount.
+function assertConnected(rows: readonly GraphInputRow[], label: string): GraphLayout {
+  const layout = computeGitGraph(rows)
+  layout.rows.forEach((current, index) => {
+    for (const l of current.lines) {
+      assert.ok(l.fromLane < layout.laneCount && l.toLane < layout.laneCount, `${label}: lane inside width at row ${index}`)
+    }
+    assert.ok(current.lane < layout.laneCount, `${label}: node inside width at row ${index}`)
+    if (!current.virtual) {
+      for (const l of current.lines.filter(l => l.from === 'node')) {
+        assert.notEqual(l.color, VIRTUAL_COLOR, `${label}: real commit uses the virtual color at row ${index}`)
+        assert.equal(l.dashed, false, `${label}: real commit draws a dashed edge at row ${index}`)
+      }
+    }
+    const next = layout.rows[index + 1]
+    if (!next) return
+    const bottom = new Map<number, Set<string>>()
+    for (const l of current.lines.filter(l => l.to === 'bottom')) {
+      const styles = bottom.get(l.toLane) ?? new Set<string>()
+      styles.add(`${l.color}/${l.dashed}`)
+      bottom.set(l.toLane, styles)
+    }
+    const top = new Map(next.lines.filter(l => l.from === 'top').map(l => [l.fromLane, `${l.color}/${l.dashed}`]))
+    assert.equal(next.lines.filter(l => l.from === 'top').length, top.size, `${label}: one line per lane at the top of row ${index + 1}`)
+    assert.deepEqual([...bottom.keys()].sort((a, b) => a - b), [...top.keys()].sort((a, b) => a - b), `${label}: lanes connect between rows ${index} and ${index + 1}`)
+    for (const [lane, styles] of bottom) {
+      assert.deepEqual([...styles], [top.get(lane)], `${label}: lane ${lane} keeps one style between rows ${index} and ${index + 1}`)
+    }
+  })
+  const loaded = new Map(rows.map((r, index) => [r.hash, index]))
+  rows.forEach((r, index) => {
+    const hasLoadedChild = rows.slice(0, index).some(child => child.parents.includes(r.hash))
+    const incoming = layout.rows[index].lines.filter(l => l.to === 'node').length
+    assert.equal(incoming > 0, hasLoadedChild, `${label}: incoming lines of ${r.hash}`)
+    for (const parent of r.parents) {
+      if (loaded.has(parent)) assert.ok(loaded.get(parent)! > index, `${label}: ${parent} is listed after its child`)
+    }
+  })
+  return layout
+}
+
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = state
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+// Random histories built oldest-first and shown newest-first, which is a valid
+// children-before-parents order; a prefix models the loaded window.
+function randomHistory(random: () => number): GraphInputRow[] {
+  const size = 2 + Math.floor(random() * 40)
+  const created: GraphInputRow[] = []
+  for (let index = 0; index < size; index++) {
+    const pick = () => created[Math.max(0, created.length - 1 - Math.floor(random() * Math.min(created.length, 8)))].hash
+    const parents: string[] = []
+    if (created.length > 0 && random() > 0.04) {
+      parents.push(pick())
+      const extra = random() < 0.2 ? (random() < 0.15 ? 2 : 1) : 0
+      for (let n = 0; n < extra; n++) {
+        const candidate = pick()
+        if (!parents.includes(candidate)) parents.push(candidate)
+      }
+    }
+    created.push({ hash: `c${index}`, parents })
+  }
+  const shown = created.reverse().slice(0, 1 + Math.floor(random() * created.length))
+  if (random() < 0.5) {
+    const head = shown[Math.floor(random() * shown.length)].hash
+    shown.unshift({ hash: UNCOMMITTED_ROW_HASH, parents: random() < 0.9 ? [head] : [], virtual: true })
+  }
+  return shown
 }
 
 // Linear history keeps a single lane and ends at the root.
@@ -158,6 +242,20 @@ function assertLines(actual: GraphLine[], expected: GraphLine[], label: string) 
   assert.equal(layout.rows[3].color, 0)
 }
 
+// A newer merge whose second parent is HEAD opens its own lane instead of
+// joining the uncommitted row's dashed lane.
+{
+  const rows = buildGraphRows([commit('pr', ['o', 'h']), commit('o', ['g']), commit('h', ['g']), commit('g')], { uncommitted: true, headHash: 'h' })
+  const layout = assertConnected(rows, 'merge into HEAD')
+  assertLines(layout.rows[1].lines, [
+    line(0, 0, 'top', 'bottom', VIRTUAL_COLOR, true),
+    line(1, 1, 'node', 'bottom', 0),
+    line(1, 2, 'node', 'bottom', 1),
+  ], 'merge edge is solid and colored')
+  const head = layout.rows[3]
+  assert.deepEqual([head.lane, head.color], [2, 1])
+}
+
 // Without a known HEAD the uncommitted row is a standalone node.
 {
   const rows = buildGraphRows([commit('x')], { uncommitted: true, headHash: null })
@@ -165,6 +263,25 @@ function assertLines(actual: GraphLine[], expected: GraphLine[], label: string) 
   assert.deepEqual(layout.rows[0].lines, [])
   assert.deepEqual([layout.rows[1].lane, layout.rows[1].lines], [0, []])
   assert.deepEqual(computeGitGraph([]), { rows: [], laneCount: 0 })
+}
+
+// Every hand-written case and a seeded batch of random histories keep the
+// structural invariants.
+{
+  const cases: GraphInputRow[][] = [
+    [row('c', 'b'), row('b', 'a'), row('a')],
+    [row('m', 'b', 'f'), row('f', 'a'), row('b', 'a'), row('a')],
+    [row('o', 'p1', 'p2', 'p3'), row('p3'), row('p2'), row('p1')],
+    [row('x', 'a'), row('y', 'b', 'a'), row('b', 'a'), row('a')],
+    [row('x', 'a'), row('y', 'a'), row('z', 'c', 'a')],
+    [row('x', 'missing'), row('y', 'other')],
+    [row('x', 'a'), row('orphan'), row('a')],
+    [row('t1', 'r1'), row('t2', 'r2'), row('r1'), row('r2')],
+    buildGraphRows([commit('o1', ['h']), commit('h', ['g']), commit('g')], { uncommitted: true, headHash: 'h' }),
+  ]
+  cases.forEach((rows, index) => assertConnected(rows, `case ${index}`))
+  const random = mulberry32(20261110)
+  for (let run = 0; run < 3000; run++) assertConnected(randomHistory(random), `random history ${run}`)
 }
 
 // HEAD detection prefers decorations and falls back to the first commit for scope "current".
@@ -229,6 +346,21 @@ async function testGraphLogSource() {
   assert.equal(await source.load('/broken', 'all', 50), null)
   assert.equal(logs.length, 3)
   assert.ok(logs[1].includes('failed: boom'))
+
+  // Loading more neither falls back to another scope nor remembers the failure.
+  calls.length = 0
+  allWorks = false
+  source.forget('/more')
+  assert.equal(await source.load('/more', 'all', 150, { retryCurrent: false, rememberFailure: false }), null)
+  assert.deepEqual(calls, ['/more:all:150'])
+  allWorks = true
+  assert.deepEqual(await source.load('/more', 'all', 50), { commits: [commit('all-head')], scope: 'all' })
+
+  // A logger that throws must not make load() reject.
+  const quiet = createGraphLogSource(async () => null, () => {
+    throw new Error('logger unavailable')
+  })
+  assert.equal(await quiet.load('/repo', 'all', 50), null)
 }
 
 testGraphLogSource().then(() => {
