@@ -83,7 +83,7 @@ Git 頁面的 commit 清單加上分支線圖（git graph），呈現方式參�
 ```
 GitPanel.loadData ─┬─ Promise.all(getLog, getStatus, getBranch, getRoot)   ← 既有，原樣
                    └─ getGraphLog(cwd, count, scope)（並行、自行處理失敗）
-                        ├─ 150 ms 內完成：直接以 graph 呈現
+                        ├─ 300 ms 內完成：直接以 graph 呈現
                         └─ 較慢：先顯示原清單，graph 到了再替換；失敗則維持原清單
 
 git_get_graph_log (Tauri) ─┬─ 遠端視窗：remote_invoke("git:graph-log")
@@ -173,7 +173,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 5. 手動按重新整理時清除該 path 的失敗紀錄；手動切換範圍時清除該 path 在目標範圍的失敗紀錄，讓使用者的操作一定會重試。debug log 的「只記一次」另以獨立集合控制，不受清除影響；記錄函式拋錯時也不影響 `load` 的結果。
 6. 載入更多使用 `retryCurrent: false, rememberFailure: false`：失敗時維持目前畫面，不改用其他範圍，也不把「在目前筆數下可用」的範圍記為失敗，下次點擊會再試。
 
-舊版 host 在每個 path 的每個範圍、每個工作階段最多收到一次 `git:graph-log`（記住的範圍是「全部分支」時，`all` 與改用的 `current` 各一次）；不另外做能力旗標。
+舊版 host 在每個 path 的每個範圍、每個工作階段最多自動收到一次 `git:graph-log`（記住的範圍是「全部分支」時，`all` 與改用的 `current` 各一次）；使用者手動重新整理或切換範圍時會再試一次（第 5 點）。不另外做能力旗標。
 
 ### 5.4 車道演算法
 

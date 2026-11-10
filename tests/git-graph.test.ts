@@ -40,12 +40,9 @@ function assertLines(actual: GraphLine[], expected: GraphLine[], label: string) 
   assert.deepEqual(sortedLines(actual), sortedLines(expected), label)
 }
 
-// Structural invariants that every layout must satisfy:
-// - each lane leaving the bottom of a row enters the top of the next row, with
-//   the same color and dash style for every line that meets at that lane;
-// - a commit has an incoming line exactly when a loaded row above leads to it;
-// - real commits never draw the uncommitted row's color;
-// - every lane index fits inside laneCount.
+// Every layout must keep lanes continuous and single-styled between rows, give a
+// commit incoming lines exactly when a loaded row above leads to it, keep the
+// virtual color off real commits, and stay within laneCount.
 function assertConnected(rows: readonly GraphInputRow[], label: string): GraphLayout {
   const layout = computeGitGraph(rows)
   layout.rows.forEach((current, index) => {
