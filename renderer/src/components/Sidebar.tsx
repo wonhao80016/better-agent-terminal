@@ -69,6 +69,8 @@ function dataTransferTypes(dataTransfer: DataTransfer): string[] {
 
 interface SidebarProps {
   width: number
+  collapsed: boolean
+  onSetCollapsed: (collapsed: boolean) => void
   workspaces: Workspace[]
   activeWorkspaceId: string | null
   windowId: string | null
@@ -94,6 +96,8 @@ interface SidebarProps {
 
 export function Sidebar({
   width,
+  collapsed,
+  onSetCollapsed,
   workspaces,
   activeWorkspaceId,
   windowId,
@@ -186,6 +190,11 @@ export function Sidebar({
   }, [])
 
   const showWorkspacesTab = useCallback(() => selectTab('workspaces'), [selectTab])
+
+  const expandToTab = useCallback((tab: SidebarTab) => {
+    selectTab(tab)
+    onSetCollapsed(false)
+  }, [selectTab, onSetCollapsed])
 
   const handleAddWorkspace = useCallback(() => {
     showWorkspacesTab()
@@ -656,7 +665,34 @@ export function Sidebar({
   }, [draggedId, dragPosition, workspaces, applyWorkspaceReorder, windowId, parseCrossWindowDrop, moveWorkspaceToWindow])
 
   return (
-    <aside ref={sidebarRef} className="sidebar" style={{ width }} onDragEnter={handleSidebarDragEnter}>
+    <>
+    {collapsed && (
+      <nav className="sidebar-collapsed" aria-label={t('sidebar.views')}>
+        <button type="button" className="sidebar-collapsed-btn" onClick={() => onSetCollapsed(false)} title={t('sidebar.expandSidebar')}>
+          &raquo;
+        </button>
+        <button type="button" className="sidebar-collapsed-btn" onClick={() => expandToTab('workspaces')} title={t('sidebar.workspaces')}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+        </button>
+        <button type="button" className="sidebar-collapsed-btn" onClick={() => expandToTab('history')} title={t('sidebar.history')}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+        </button>
+        <div className="sidebar-collapsed-spacer" />
+        <button type="button" className="sidebar-collapsed-btn" onClick={onOpenSettings} title={t('sidebar.settings')}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </nav>
+    )}
+    {/* Kept mounted while collapsed so History filters, a running move and the native drop listener survive. */}
+    <aside ref={sidebarRef} className="sidebar" style={{ width, display: collapsed ? 'none' : undefined }} onDragEnter={handleSidebarDragEnter}>
       <div className="sidebar-header">
         <div className="sidebar-tabs" role="tablist" aria-label={t('sidebar.views')}>
           {SIDEBAR_TABS.map(tab => {
@@ -696,6 +732,9 @@ export function Sidebar({
               {activeProfileName}
             </span>
           )}
+          <button type="button" className="sidebar-collapse-btn" onClick={() => onSetCollapsed(true)} title={t('sidebar.collapseSidebar')}>
+            &laquo;
+          </button>
         </div>
       </div>
       {/* Group Filter */}
@@ -890,7 +929,7 @@ export function Sidebar({
       </div>
       {historyMounted && (
         <SessionHistoryPanel
-          active={activeTab === 'history'}
+          active={activeTab === 'history' && !collapsed}
           onWorkspaceShown={showWorkspacesTab}
           remoteHostLabel={remoteHostLabel}
           remoteOrigin={remoteOrigin}
@@ -1090,5 +1129,6 @@ export function Sidebar({
         </div>
       )}
     </aside>
+    </>
   )
 }

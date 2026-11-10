@@ -268,6 +268,8 @@
     "settings": "設定",
     "history": "歷史紀錄",
     "views": "側欄檢視",
+    "collapseSidebar": "收合側欄",
+    "expandSidebar": "展開側欄",
     "connectedToRemote": "已連線至遠端主機",
     "clickToManageProfiles": "點擊管理設定檔",
     "dragToReorder": "拖曳以重新排序",

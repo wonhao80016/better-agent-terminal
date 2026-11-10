@@ -263,6 +263,8 @@
     "settings": "設定",
     "history": "履歴",
     "views": "サイドバー表示",
+    "collapseSidebar": "サイドバーを折りたたむ",
+    "expandSidebar": "サイドバーを展開",
     "connectedToRemote": "リモートホストに接続済み",
     "clickToManageProfiles": "クリックしてプロファイルを管理",
     "dragToReorder": "ドラッグして並べ替え",

@@ -34,6 +34,7 @@ import type { AppState, EnvVariable, TerminalInstance } from './types'
 interface PanelSettings {
   sidebar: {
     width: number
+    collapsed?: boolean
   }
   snippetSidebar: {
     width: number
@@ -315,6 +316,14 @@ export default function App() {
   const handleSidebarResetWidth = useCallback(() => {
     setPanelSettings(prev => {
       const updated = { ...prev, sidebar: { ...prev.sidebar, width: DEFAULT_SIDEBAR_WIDTH } }
+      savePanelSettings(updated)
+      return updated
+    })
+  }, [])
+
+  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
+    setPanelSettings(prev => {
+      const updated = { ...prev, sidebar: { ...prev.sidebar, collapsed } }
       savePanelSettings(updated)
       return updated
     })
@@ -1297,6 +1306,8 @@ export default function App() {
       />
       <Sidebar
         width={panelSettings.sidebar.width}
+        collapsed={panelSettings.sidebar.collapsed === true}
+        onSetCollapsed={handleSidebarCollapsedChange}
         workspaces={visibleWorkspaces}
         activeWorkspaceId={state.activeWorkspaceId}
         windowId={currentWindowId}
@@ -1327,11 +1338,13 @@ export default function App() {
         onOpenProfiles={() => setShowProfiles(true)}
         onOpenSettings={() => setShowSettings(true)}
       />
-      <ResizeHandle
-        direction="horizontal"
-        onResize={handleSidebarResize}
-        onDoubleClick={handleSidebarResetWidth}
-      />
+      {panelSettings.sidebar.collapsed !== true && (
+        <ResizeHandle
+          direction="horizontal"
+          onResize={handleSidebarResize}
+          onDoubleClick={handleSidebarResetWidth}
+        />
+      )}
       <main className="main-content">
         {visibleWorkspaces.length > 0 ? (
           // Only mount workspaces that have been visited (lazy mount)

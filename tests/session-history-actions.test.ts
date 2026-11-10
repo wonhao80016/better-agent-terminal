@@ -665,7 +665,7 @@ async function main() {
   assert.ok(sidebarSource.includes('<SessionHistoryPanel'), 'the sidebar hosts the history panel')
   assert.ok(!sidebarSource.includes('onOpenHistory'), 'the footer no longer opens history')
   assert.ok(!appSource.includes('SessionHistoryModal'), 'the history modal is gone')
-  assert.ok(sidebarSource.includes("active={activeTab === 'history'}"), 'polling follows tab visibility')
+  assert.ok(sidebarSource.includes("active={activeTab === 'history' && !collapsed}"), 'polling follows tab visibility and stops while the sidebar is collapsed')
   assert.ok(sidebarSource.includes('onClick={handleAddWorkspace}'), 'adding a workspace returns to the Workspaces tab')
   assert.ok(sidebarSource.includes('onDragEnter={handleSidebarDragEnter}'), 'dragging files over the sidebar returns to the Workspaces tab')
   assert.ok(!panelSource.includes('settings-overlay'), 'the panel itself is not a modal overlay')
