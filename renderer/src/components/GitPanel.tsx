@@ -3,8 +3,11 @@ import { Fragment, useState, useEffect, useCallback, useMemo, useRef, type CSSPr
 import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
 import { ResizeHandle } from './ResizeHandle'
+import { GitGraphCell, GitRefBadges, graphWidthStyle } from './GitGraph'
 import { useResizablePaneWidth } from '../hooks/useResizablePaneWidth'
 import { buildInlineFileRows, changeBlockEnd, changeBlockStarts, parseUnifiedDiff, splitContentLines, type DiffRow } from '../utils/unified-diff'
+import { buildGraphRows, computeGitGraph, findHeadHash, type GitGraphScope } from '../lib/git-graph'
+import { createGraphLogSource, type GraphLogResult } from '../lib/git-graph-source'
 
 interface GitCommit {
   hash: string
@@ -39,6 +42,41 @@ const TEXT_EXTS = new Set([
 function isTextFile(name: string): boolean {
   const ext = name.split('.').pop()?.toLowerCase() || ''
   return TEXT_EXTS.has(ext)
+}
+
+const GRAPH_SCOPE_STORAGE_KEY = 'better-terminal-git-graph-scope'
+const GRAPH_INITIAL_COUNT = 50
+const GRAPH_PAGE_SIZE = 100
+const GRAPH_MAX_COUNT = 500
+// How long the first paint waits for the graph after the plain list is ready.
+const GRAPH_FIRST_PAINT_GRACE_MS = 300
+const GRAPH_PENDING = Symbol('graph-pending')
+
+const graphLogSource = createGraphLogSource(
+  (cwd, count, scope) => host.git.getGraphLog(cwd, count, scope),
+  message => {
+    host.debug.log(message).catch(() => undefined)
+  },
+)
+
+function readStoredGraphScope(): GitGraphScope {
+  try {
+    return localStorage.getItem(GRAPH_SCOPE_STORAGE_KEY) === 'all' ? 'all' : 'current'
+  } catch {
+    return 'current'
+  }
+}
+
+function writeStoredGraphScope(scope: GitGraphScope): void {
+  try {
+    localStorage.setItem(GRAPH_SCOPE_STORAGE_KEY, scope)
+  } catch {
+    // The scope choice is presentation-only; losing it is harmless.
+  }
+}
+
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | typeof GRAPH_PENDING> {
+  return Promise.race([promise, new Promise<typeof GRAPH_PENDING>(resolve => setTimeout(() => resolve(GRAPH_PENDING), ms))])
 }
 
 function formatDate(dateStr: string): string {
@@ -202,6 +240,17 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const [isGitRepo, setIsGitRepo] = useState(true)
   const [gitRoot, setGitRoot] = useState<string | null>(null)
   const [activePath, setActivePath] = useState(workspaceFolderPath)
+  const [graph, setGraph] = useState<GraphLogResult | null>(null)
+  const [graphCount, setGraphCount] = useState(GRAPH_INITIAL_COUNT)
+  const [graphBusy, setGraphBusy] = useState(false)
+  const [initialGraphScope] = useState(readStoredGraphScope)
+  const graphScopeRef = useRef<GitGraphScope>(initialGraphScope)
+  const graphCountRef = useRef(GRAPH_INITIAL_COUNT)
+  const graphPathRef = useRef<string | null>(null)
+  // loadData owns the plain list; graph-only reloads must not discard its result.
+  const loadRequestRef = useRef(0)
+  const graphRequestRef = useRef(0)
+  const selectedCommitRef = useRef<string | null>(null)
   const columnsRef = useRef<HTMLDivElement>(null)
   const commitPane = useResizablePaneWidth(columnsRef, 'better-terminal-git-commit-width', 28, 10, 50)
   const filePane = useResizablePaneWidth(columnsRef, 'better-terminal-git-file-width', 22, 10, 40)
@@ -229,13 +278,31 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   ]
   const hasWorktrees = worktreePaths.length > 0
 
+  useEffect(() => {
+    selectedCommitRef.current = selectedCommit
+  }, [selectedCommit])
+
+  const applyGraph = useCallback((result: GraphLogResult | null) => {
+    setGraph(result)
+    if (result) graphScopeRef.current = result.scope
+  }, [])
+
   const loadData = useCallback(async () => {
+    const loadId = ++loadRequestRef.current
+    const graphId = ++graphRequestRef.current
+    if (graphPathRef.current !== activePath) {
+      graphPathRef.current = activePath
+      graphCountRef.current = GRAPH_INITIAL_COUNT
+      setGraphCount(GRAPH_INITIAL_COUNT)
+    }
     setLoading(true)
+    setGraphBusy(false)
     setSelectedCommit(null)
     setChangedFiles([])
     setSelectedFile(null)
     setDiff('')
     setFileDiff('')
+    const graphRequest = graphLogSource.load(activePath, graphScopeRef.current, graphCountRef.current)
     try {
       const [logResult, statusResult, branch, root] = await Promise.all([
         host.git.getLog(activePath),
@@ -243,19 +310,73 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
         host.git.getBranch(activePath),
         host.git.getRoot(activePath),
       ])
+      if (loadId !== loadRequestRef.current) return
       setIsGitRepo(branch !== null)
       setGitRoot(root)
       setCommits(logResult)
       setStatus(statusResult)
     } catch {
+      if (loadId !== loadRequestRef.current) return
       setIsGitRepo(false)
     }
+    const early = await settleWithin(graphRequest, GRAPH_FIRST_PAINT_GRACE_MS)
+    if (loadId !== loadRequestRef.current) return
+    if (graphId === graphRequestRef.current) applyGraph(early === GRAPH_PENDING ? null : early)
     setLoading(false)
-  }, [activePath])
+    if (early !== GRAPH_PENDING) return
+    const result = await graphRequest
+    if (loadId === loadRequestRef.current && graphId === graphRequestRef.current) applyGraph(result)
+  }, [activePath, applyGraph])
 
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  const reloadGraph = useCallback(async (scope: GitGraphScope, count: number, persistScope: boolean) => {
+    const graphId = ++graphRequestRef.current
+    setGraphBusy(true)
+    const result = await graphLogSource.load(activePath, scope, count)
+    if (graphId !== graphRequestRef.current) return
+    setGraphBusy(false)
+    if (!result) return
+    if (persistScope && result.scope === scope) writeStoredGraphScope(scope)
+    graphCountRef.current = count
+    setGraphCount(count)
+    applyGraph(result)
+    const selected = selectedCommitRef.current
+    if (selected && selected !== 'working' && !result.commits.some(commit => commit.hash === selected)) {
+      setSelectedCommit(null)
+      setChangedFiles([])
+      setSelectedFile(null)
+      setDiff('')
+      setFileDiff('')
+    }
+  }, [activePath, applyGraph])
+
+  const handleRefresh = useCallback(() => {
+    graphLogSource.forget(activePath)
+    loadData()
+  }, [activePath, loadData])
+
+  const handleToggleScope = useCallback(() => {
+    if (!graph) return
+    const nextScope: GitGraphScope = graph.scope === 'all' ? 'current' : 'all'
+    graphLogSource.forget(activePath, nextScope)
+    reloadGraph(nextScope, graphCountRef.current, true)
+  }, [graph, activePath, reloadGraph])
+
+  const handleLoadMore = useCallback(() => {
+    if (!graph) return
+    reloadGraph(graph.scope, Math.min(graphCountRef.current + GRAPH_PAGE_SIZE, GRAPH_MAX_COUNT), false)
+  }, [graph, reloadGraph])
+
+  const graphLayout = useMemo(() => {
+    if (!graph) return null
+    const headHash = findHeadHash(graph.commits, graph.scope)
+    return computeGitGraph(buildGraphRows(graph.commits, { uncommitted: status.length > 0, headHash }))
+  }, [graph, status.length])
+  const graphRowOffset = status.length > 0 ? 1 : 0
+  const canLoadMoreCommits = graph !== null && graph.commits.length >= graphCount && graphCount < GRAPH_MAX_COUNT
 
   const handleSelectCommit = useCallback(async (hash: string) => {
     setSelectedCommit(hash)
@@ -367,16 +488,35 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
       <div className="git-commit-list" style={commitPane.style}>
         <div className="git-col-header">
           <span>{t('git.commits')}</span>
-          <button className="git-refresh-btn" onClick={loadData} title={t('git.refresh')}>↻</button>
+          {graph ? (
+            <span className="git-col-header-actions">
+              <button
+                type="button"
+                className="git-graph-scope-btn"
+                onClick={handleToggleScope}
+                disabled={graphBusy}
+                title={t('git.scopeToggleTitle')}
+              >
+                {graph.scope === 'all' ? t('git.scopeAll') : t('git.scopeCurrent')}
+              </button>
+              <button className="git-refresh-btn" onClick={handleRefresh} title={t('git.refresh')}>↻</button>
+            </span>
+          ) : (
+            <button className="git-refresh-btn" onClick={handleRefresh} title={t('git.refresh')}>↻</button>
+          )}
         </div>
-        <div className="git-commit-list-items">
+        <div
+          className={`git-commit-list-items${graphLayout ? ' git-graph-list' : ''}`}
+          style={graphLayout ? graphWidthStyle(graphLayout.laneCount) : undefined}
+        >
           {status.length > 0 && (
             <div
-              className={`git-commit-item ${selectedCommit === 'working' ? 'active' : ''}`}
+              className={`git-commit-item${graphLayout ? ' git-commit-item-graph' : ''} ${selectedCommit === 'working' ? 'active' : ''}`}
               onClick={() => handleSelectCommit('working')}
             >
+              {graphLayout && <GitGraphCell row={graphLayout.rows[0]} laneCount={graphLayout.laneCount} />}
               <div className="git-commit-message">
-                <span className="git-uncommitted-badge">●</span>
+                {!graphLayout && <span className="git-uncommitted-badge">●</span>}
                 {t('git.uncommittedChanges')}
               </div>
               <div className="git-commit-meta">
@@ -384,7 +524,33 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
               </div>
             </div>
           )}
-          {commits.map(commit => (
+          {graph && graphLayout && graph.commits.map((commit, index) => {
+            const row = graphLayout.rows[index + graphRowOffset]
+            return (
+              <div
+                key={commit.hash}
+                className={`git-commit-item git-commit-item-graph ${selectedCommit === commit.hash ? 'active' : ''}`}
+                onClick={() => handleSelectCommit(commit.hash)}
+              >
+                <GitGraphCell row={row} laneCount={graphLayout.laneCount} />
+                <div className="git-commit-message">
+                  <GitRefBadges refs={commit.refs} color={row.color} />
+                  {commit.message}
+                </div>
+                <div className="git-commit-meta">
+                  <span className="git-commit-hash">{commit.hash.substring(0, 7)}</span>
+                  <span className="git-commit-author">{commit.author}</span>
+                  <span className="git-commit-date">{formatDate(commit.date)}</span>
+                </div>
+              </div>
+            )
+          })}
+          {canLoadMoreCommits && (
+            <button type="button" className="git-load-more-btn" onClick={handleLoadMore} disabled={graphBusy}>
+              {graphBusy ? t('common.loading') : t('git.loadMore')}
+            </button>
+          )}
+          {!graph && commits.map(commit => (
             <div
               key={commit.hash}
               className={`git-commit-item ${selectedCommit === commit.hash ? 'active' : ''}`}

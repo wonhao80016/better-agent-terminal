@@ -414,6 +414,148 @@
   color: var(--accent-color, #d97706);
 }
 
+/* Commit graph: rules apply only under graph-mode classes. */
+.git-graph-list {
+  --git-graph-color-0: #4e9cf5;
+  --git-graph-color-1: #e05cc0;
+  --git-graph-color-2: #3fbf6f;
+  --git-graph-color-3: #e89a3c;
+  --git-graph-color-4: #a57af0;
+  --git-graph-color-5: #e5534b;
+  --git-graph-color-6: #2bb5b0;
+  --git-graph-color-7: #c7b33e;
+}
+
+/* Both 40% values resolve against the list width, so text and graph stay aligned. */
+.git-commit-item.git-commit-item-graph {
+  position: relative;
+  padding-left: calc(min(var(--git-graph-width), 40%) + 4px);
+}
+
+/* A left border would shift the graph on the selected row. */
+.git-commit-item.git-commit-item-graph.active {
+  border-left: none;
+  box-shadow: inset 2px 0 0 var(--accent-color, #d97706);
+}
+
+.git-graph-cell {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: -1px;
+  width: min(var(--git-graph-width), 40%);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.git-graph-svg {
+  display: block;
+  height: 100%;
+}
+
+.git-graph-node {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: var(--git-graph-node-color);
+}
+
+.git-graph-node-uncommitted {
+  background: var(--bg-primary);
+  border: 2px solid #f59e0b;
+}
+
+.git-col-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.git-graph-scope-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.git-graph-scope-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-graph-scope-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.git-ref-badges {
+  margin-right: 2px;
+}
+
+.git-ref-badge {
+  display: inline-block;
+  max-width: 120px;
+  margin-right: 3px;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+  border: 1px solid var(--git-ref-color);
+  border-radius: 3px;
+  color: var(--git-ref-color);
+  font-size: 10px;
+  line-height: 13px;
+}
+
+.git-ref-badge.git-ref-current,
+.git-ref-badge.git-ref-head {
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.git-ref-badge.git-ref-remote {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.git-ref-badge.git-ref-tag {
+  border-style: dashed;
+}
+
+.git-ref-badge.git-ref-more {
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
+.git-load-more-btn {
+  display: block;
+  width: 100%;
+  padding: 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.git-load-more-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.git-load-more-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
 /* Column 2: Changed files */
 .git-file-list {
   flex: 0 0 22%;
