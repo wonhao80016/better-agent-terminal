@@ -953,6 +953,16 @@ function createTauriHost(): BatAppAPI {
           'git_get_log',
           { cwd, count },
         ),
+      // null when the graph is unavailable (git failure or a host without it).
+      getGraphLog: (cwd: string, count?: number, scope?: 'current' | 'all') =>
+        getInvoke()<{
+          hash: string
+          parents: string[]
+          refs: { kind: string; name: string; current: boolean }[]
+          author: string
+          date: string
+          message: string
+        }[] | null>('git_get_graph_log', { cwd, count, scope }),
       getDiff: (cwd: string, commitHash?: string, filePath?: string) =>
         getInvoke()<string>('git_get_diff', { cwd, commitHash, filePath }),
       getDiffFiles: (cwd: string, commitHash?: string) =>

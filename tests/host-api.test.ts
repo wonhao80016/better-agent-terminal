@@ -130,6 +130,16 @@ async function run() {
       if (cmd === 'git_get_log') {
         return [{ hash: 'h1', author: 'a', date: 'd', message: 'm' }] as unknown as T
       }
+      if (cmd === 'git_get_graph_log') {
+        return [{
+          hash: 'h1',
+          parents: ['h0'],
+          refs: [{ kind: 'branch', name: 'main', current: true }],
+          author: 'a',
+          date: 'd',
+          message: 'm',
+        }] as unknown as T
+      }
       if (cmd === 'git_get_diff') return 'diff --git a/x b/x\n' as unknown as T
       if (cmd === 'git_get_diff_files') {
         return [{ status: 'M', file: 'a.ts' }] as unknown as T
@@ -448,6 +458,16 @@ async function run() {
     assert.deepEqual(log, [{ hash: 'h1', author: 'a', date: 'd', message: 'm' }])
     // count is optional — undefined still flows through to invoke
     await mod.host.git.getLog('/repo')
+    const graphLog = await mod.host.git.getGraphLog('/repo', 150, 'all')
+    assert.deepEqual(graphLog, [{
+      hash: 'h1',
+      parents: ['h0'],
+      refs: [{ kind: 'branch', name: 'main', current: true }],
+      author: 'a',
+      date: 'd',
+      message: 'm',
+    }])
+    await mod.host.git.getGraphLog('/repo')
     const diff = await mod.host.git.getDiff('/repo', 'abc', 'a.ts')
     assert.equal(diff, 'diff --git a/x b/x\n')
     // commit + filePath both optional
@@ -862,6 +882,8 @@ async function run() {
       { cmd: 'git_get_branch', args: { cwd: '/repo' } },
       { cmd: 'git_get_log', args: { cwd: '/repo', count: 25 } },
       { cmd: 'git_get_log', args: { cwd: '/repo', count: undefined } },
+      { cmd: 'git_get_graph_log', args: { cwd: '/repo', count: 150, scope: 'all' } },
+      { cmd: 'git_get_graph_log', args: { cwd: '/repo', count: undefined, scope: undefined } },
       { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: 'abc', filePath: 'a.ts' } },
       { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: undefined, filePath: undefined } },
       { cmd: 'git_get_diff_files', args: { cwd: '/repo', commitHash: 'abc' } },
