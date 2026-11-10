@@ -168,7 +168,7 @@
     "accountSwitchingError": "Error: {{error}}",
     "notifications": "Notifications",
     "showDockBadge": "Show pending count on Dock icon",
-    "showDockBadgeHint": "Display a badge number on the Dock icon when workspaces have pending actions (permission requests, user questions).",
+    "showDockBadgeHint": "Display a badge number on the Dock icon when workspaces have pending actions (permission requests, user questions) or unread agent completions.",
     "notifyOnComplete": "Notify when Agent completes",
     "notifyOnCompleteHint": "Send a system notification when an Agent session finishes its task.",
     "notifySound": "Play notification sound",
@@ -286,6 +286,23 @@
     "wakeAgent": "Wake Agent",
     "restAgent": "Rest Agent",
     "closeWorkspace": "Close Workspace"
+  },
+
+  "projects": {
+    "title": "Projects",
+    "repoCount_one": "{{count}} repo",
+    "repoCount_other": "{{count}} repos",
+    "sessionCount_one": "{{count}} Claude session",
+    "sessionCount_other": "{{count}} Claude sessions",
+    "rescan": "Rescan",
+    "scanning": "Scanning…",
+    "empty": "No git repositories found next to your workspaces.",
+    "openFailed": "Could not open project: {{error}}",
+    "scanFailed": "Could not scan projects: {{error}}",
+    "startSession": "Start Claude session",
+    "startSessionInWorktree": "Start Claude session in worktree",
+    "detached": "(detached)",
+    "worktreeFallback": "worktree"
   },
 
   "profiles": {
@@ -612,6 +629,10 @@
     "hideThinkingMessages": "Hide thinking messages",
     "showThinkingMessages": "Show thinking messages",
     "loadOlderMessages": "Load older messages ({{count}} archived)",
+    "loadOlderHistory": "Load older history",
+    "loadNewerHistory": "Load newer history",
+    "sessionResumeFailed": "Session resume failed; retrying: {{message}}",
+    "historyPageFailed": "Could not load history: {{message}}",
     "resumingHistory": "Loading session history…",
     "allowThisCall": "Allow this <strong>{{toolName}}</strong> call?",
     "yes": "Yes",

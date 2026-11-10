@@ -168,7 +168,7 @@
     "accountSwitchingError": "錯誤：{{error}}",
     "notifications": "通知",
     "showDockBadge": "Dock 圖示顯示待處理數量",
-    "showDockBadgeHint": "有待處理的動作（權限請求、使用者問題）時，在 Dock 圖示上顯示數字徽章。",
+    "showDockBadgeHint": "有待處理的動作（權限請求、使用者問題）或未讀的代理完成通知時，在 Dock 圖示上顯示數字徽章。",
     "notifyOnComplete": "Agent 完成時發送系統通知",
     "notifyOnCompleteHint": "Agent 完成任務時發送系統通知。",
     "notifySound": "播放通知音效",
@@ -286,6 +286,21 @@
     "wakeAgent": "喚醒 Agent",
     "restAgent": "休眠 Agent",
     "closeWorkspace": "關閉工作區"
+  },
+
+  "projects": {
+    "title": "專案",
+    "repoCount_other": "{{count}} 個儲存庫",
+    "sessionCount_other": "{{count}} 個 Claude 工作階段",
+    "rescan": "重新掃描",
+    "scanning": "掃描中…",
+    "empty": "在工作區所在目錄中找不到 Git 儲存庫。",
+    "openFailed": "無法開啟專案：{{error}}",
+    "scanFailed": "無法掃描專案：{{error}}",
+    "startSession": "啟動 Claude 工作階段",
+    "startSessionInWorktree": "在此 worktree 中啟動 Claude 工作階段",
+    "detached": "（分離 HEAD）",
+    "worktreeFallback": "worktree"
   },
 
   "profiles": {
@@ -611,6 +626,10 @@
     "hideThinkingMessages": "隱藏思考訊息",
     "showThinkingMessages": "顯示思考訊息",
     "loadOlderMessages": "載入較舊的訊息（{{count}} 則已封存）",
+    "loadOlderHistory": "載入更早的歷史紀錄",
+    "loadNewerHistory": "載入較新的歷史紀錄",
+    "sessionResumeFailed": "工作階段恢復失敗，正在重試：{{message}}",
+    "historyPageFailed": "無法載入歷史紀錄：{{message}}",
     "resumingHistory": "正在載入工作階段歷史…",
     "allowThisCall": "允許此 <strong>{{toolName}}</strong> 呼叫？",
     "yes": "是",

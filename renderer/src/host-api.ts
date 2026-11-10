@@ -1,3 +1,4 @@
+import { formatError, setRemoteErrorHost } from './utils/resume-recovery'
 // Host API adapter.
 //
 // Renderer code should import { host } from this module instead of reading
@@ -185,7 +186,21 @@ function getInvoke(): Invoke {
   // the property read is cheap.
   const g = (globalThis as unknown as { window?: { __TAURI_INTERNALS__?: { invoke: Invoke } } }).window
   const direct = g?.__TAURI_INTERNALS__?.invoke
-  if (direct) return direct
+  if (direct) return async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+    if (cmd === 'remote_connect' && typeof args?.host === 'string') setRemoteErrorHost(args.host)
+    try {
+      return await direct<T>(cmd, args)
+    } catch (error) {
+      if (cmd !== 'debug_log' && (cmd.startsWith('remote_') || cmd === 'claude_client_resume'
+        || /remote\.invoke/.test(typeof error === 'string' ? error : String((error as { message?: unknown })?.message)))) {
+        void direct('debug_log', { args: [cmd + ' failed', formatError(error, {
+          host: typeof args?.host === 'string' ? args.host : undefined,
+          sessionId: typeof args?.sessionId === 'string' ? args.sessionId : undefined,
+        })] }).catch(() => {})
+      }
+      throw error
+    }
+  }
   throw new Error('host-api: tauri invoke not available; ensure window.__TAURI_INTERNALS__ is present')
 }
 
@@ -1086,7 +1101,7 @@ function createTauriHost(): BatAppAPI {
         }
         if (key === 'loadArchived') {
           return (sessionId: string, offset: number, limit: number) =>
-            getInvoke()<{ messages: unknown[]; total: number; hasMore: boolean }>(
+            getInvoke()<{ messages: unknown[]; total: number; hasMore: boolean; start?: number; end?: number }>(
               'claude_load_archived',
               { sessionId, offset, limit },
             )
@@ -1159,10 +1174,12 @@ function createTauriHost(): BatAppAPI {
             permissionMode?: string,
             effort?: string,
             ultracode?: boolean,
+            historyBefore?: number,
           ) => getInvoke()<unknown>('claude_client_resume', {
             sessionId,
             sdkSessionId,
             options: await attachWorkspaceIdentity(sessionId, {
+              ...(historyBefore !== undefined ? { historyBefore } : {}),
               cwd,
               model,
               apiVersion,
@@ -1445,6 +1462,12 @@ function createTauriHost(): BatAppAPI {
         listenAdapter<unknown>('claude-channel:usage', callback),
       onResult: (callback: (payload: unknown) => void) =>
         listenAdapter<unknown>('claude-channel:result', callback),
+    },
+    // Project discovery (sidebar Projects section): git repos under the given
+    // code roots, scanned by the sidecar on the window's host.
+    projects: {
+      list: (codeRoots: string[]) =>
+        getInvoke()<unknown>('projects_list', { codeRoots }),
     },
     claudeCli: {
       getCapabilities: () => getInvoke()<unknown>('claude_cli_get_capabilities'),

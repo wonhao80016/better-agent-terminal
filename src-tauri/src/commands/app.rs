@@ -16,6 +16,9 @@ use serde_json::Value;
 #[cfg(feature = "desktop")]
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicI64;
+#[cfg(feature = "desktop")]
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
@@ -197,6 +200,7 @@ pub(crate) fn renderer_url(path: &str) -> WebviewUrl {
 }
 
 pub(crate) fn log_tauri(app: &HostContext, message: &str) {
+    let message = crate::connection_diagnostics::redact(message);
     eprintln!("[tauri] {message}");
     let Some(path) = app
         .data_dir_opt()
@@ -204,7 +208,7 @@ pub(crate) fn log_tauri(app: &HostContext, message: &str) {
     else {
         return;
     };
-    let line = tauri_log_line(message);
+    let line = tauri_log_line(&message);
     // Synchronous single-line append (like the pty debug loggers): a fire-and-
     // forget tokio spawn_blocking would panic on the headless server's plain
     // OS threads, which run outside any tokio runtime.
@@ -766,13 +770,55 @@ fn badge_count_value(count: i64) -> Option<i64> {
     }
 }
 
+// The Dock badge has two sources: pending actions (permission requests,
+// questions) that the renderer reports through `app_set_dock_badge`, and
+// unread agent completions that the host tracks in its notification list.
+// The host combines them so a completion reaches the badge even while the
+// window is in the background and its webview is throttled.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+static DOCK_BADGE_PENDING: AtomicI64 = AtomicI64::new(0);
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+static DOCK_BADGE_COMPLETIONS: AtomicI64 = AtomicI64::new(0);
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+fn dock_badge_total(pending: i64, completions: i64, settings: &Value) -> i64 {
+    if settings.get("showDockBadge").and_then(Value::as_bool) == Some(false) {
+        return 0;
+    }
+    pending.max(0).saturating_add(completions.max(0))
+}
+
 #[cfg(feature = "desktop")]
-#[tauri::command]
-pub fn app_set_dock_badge(app: AppHandle, count: i64) {
-    let badge = badge_count_value(count);
+pub(crate) fn apply_dock_badge(app: &AppHandle) {
+    let settings = HostContext::from_app(app.clone())
+        .data_dir_opt()
+        .and_then(|dir| crate::commands::settings::settings_load_impl(&dir).ok().flatten())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or(Value::Null);
+    let total = dock_badge_total(
+        DOCK_BADGE_PENDING.load(Ordering::SeqCst),
+        DOCK_BADGE_COMPLETIONS.load(Ordering::SeqCst),
+        &settings,
+    );
+    let badge = badge_count_value(total);
     for window in app.webview_windows().values() {
         let _ = window.set_badge_count(badge);
     }
+}
+
+/// Called by the notification list whenever it changes.
+#[cfg(feature = "desktop")]
+pub(crate) fn set_dock_badge_completions(app: &AppHandle, count: i64) {
+    if DOCK_BADGE_COMPLETIONS.swap(count, Ordering::SeqCst) != count {
+        apply_dock_badge(app);
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn app_set_dock_badge(app: AppHandle, count: i64) {
+    DOCK_BADGE_PENDING.store(count, Ordering::SeqCst);
+    apply_dock_badge(&app);
 }
 
 /// OS toast for an agent completion. The renderer decides *whether* to notify
@@ -819,6 +865,45 @@ pub fn app_notify(
                 &HostContext::from_app(app.clone()),
                 &format!("[notify] OS notification failed: {err}"),
             );
+        }
+    }
+}
+
+// Sound names understood by the notification backends: macOS maps this one to
+// the system's default notification sound; Linux uses the freedesktop sound
+// theme name for an incoming message.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+const COMPLETION_TOAST_SOUND: &str = "NSUserNotificationDefaultSoundName";
+#[cfg(all(feature = "desktop", not(windows), not(target_os = "macos")))]
+const COMPLETION_TOAST_SOUND: &str = "message-new-instant";
+
+/// Host-side completion toast (see notification::add_entry). Windows uses the
+/// WinRT path so a click can refocus the window and workspace; elsewhere the
+/// notification plugin delivers it.
+#[cfg(feature = "desktop")]
+pub(crate) fn notify_completion_toast(
+    app: AppHandle,
+    window_label: String,
+    title: String,
+    body: Option<String>,
+    workspace_id: Option<String>,
+    sound: bool,
+) {
+    #[cfg(windows)]
+    notify_windows_toast(app, window_label, title, body, workspace_id, sound);
+    #[cfg(not(windows))]
+    {
+        let _ = (window_label, workspace_id);
+        use tauri_plugin_notification::NotificationExt;
+        let mut builder = app.notification().builder().title(title);
+        if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+            builder = builder.body(body);
+        }
+        if sound {
+            builder = builder.sound(COMPLETION_TOAST_SOUND);
+        }
+        if let Err(err) = builder.show() {
+            log_tauri(&HostContext::from_app(app.clone()), &format!("[notify] OS notification failed: {err}"));
         }
     }
 }
@@ -975,6 +1060,18 @@ mod tests {
         assert_eq!(badge_count_value(0), None);
         assert_eq!(badge_count_value(-1), None);
         assert_eq!(badge_count_value(42), Some(42));
+    }
+
+    #[test]
+    fn dock_badge_adds_unread_completions_to_pending_actions() {
+        let defaults = serde_json::json!({});
+        assert_eq!(dock_badge_total(0, 0, &defaults), 0);
+        assert_eq!(dock_badge_total(0, 2, &defaults), 2, "completions alone must light the badge");
+        assert_eq!(dock_badge_total(1, 2, &defaults), 3);
+        assert_eq!(dock_badge_total(-1, 1, &defaults), 1);
+        assert_eq!(dock_badge_total(i64::MAX, 1, &defaults), i64::MAX);
+        assert_eq!(dock_badge_total(0, 2, &serde_json::json!({ "showDockBadge": true })), 2);
+        assert_eq!(dock_badge_total(1, 2, &serde_json::json!({ "showDockBadge": false })), 0);
     }
 
     #[test]
@@ -1144,6 +1241,41 @@ mod tests {
     fn tauri_log_line_has_tauri_prefix() {
         let line = tauri_log_line("hello");
         assert!(line.contains(" [tauri] hello\n"));
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn diagnostic_file_redacts_connection_credentials() {
+        use crate::host_context::HeadlessHost;
+        use std::sync::Arc;
+        let dir =
+            std::env::temp_dir().join(format!("bat-log-redaction-{:032x}", rand::random::<u128>()));
+        let ctx = HostContext::from_headless(Arc::new(HeadlessHost::new(
+            Some(dir.clone()),
+            Arc::new(|_, _| {}),
+        )));
+        log_tauri(
+            &ctx,
+            "upgrade failed wss://example.invalid?token=fixture-secret&fp=AA",
+        );
+        log_tauri(
+            &ctx,
+            r#"auth {"token":"fixture-secret","remoteToken":"second-secret"}"#,
+        );
+        // The shared log writer batches asynchronously; wait for both queued
+        // lines before checking the durable file or removing its directory.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let text = loop {
+            let text = std::fs::read_to_string(dir.join("logs/debug.log")).unwrap_or_default();
+            if text.lines().count() >= 2 || std::time::Instant::now() >= deadline {
+                break text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!text.contains("fixture-secret") && !text.contains("second-secret"));
+        assert!(text.contains("?token=[REDACTED]&fp=AA"));
+        assert!(text.contains(r#""remoteToken":"[REDACTED]""#));
     }
 
     #[cfg(feature = "desktop")]

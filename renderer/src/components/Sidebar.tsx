@@ -5,6 +5,7 @@ import type { Workspace } from '../types'
 import { WORKSPACE_COLORS } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
 import { ActivityIndicator } from './ActivityIndicator'
+import { ProjectsSidebar } from './ProjectsSidebar'
 import { NotificationBell } from './NotificationBell'
 import { SessionHistoryPanel } from './SessionHistoryPanel'
 import {
@@ -134,6 +135,8 @@ export function Sidebar({
   const [activeTab, setActiveTab] = useState<SidebarTab>(readStoredSidebarTab)
   // The history panel stays mounted after its first view so filters and a running move survive tab switches.
   const [historyMounted, setHistoryMounted] = useState(activeTab === 'history')
+  // The Projects list mounts (and scans) only while its section is expanded.
+  const [projectsOpen, setProjectsOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const groupInputRef = useRef<HTMLInputElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -927,6 +930,15 @@ export function Sidebar({
         )
         )}
       </div>
+      <details
+        className="projects-section"
+        open={projectsOpen}
+        onToggle={(e) => setProjectsOpen(e.currentTarget.open)}
+        hidden={activeTab !== 'workspaces'}
+      >
+        <summary className="projects-summary">{t('projects.title')}</summary>
+        {projectsOpen && <ProjectsSidebar />}
+      </details>
       {historyMounted && (
         <SessionHistoryPanel
           active={activeTab === 'history' && !collapsed}
