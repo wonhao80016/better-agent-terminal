@@ -3698,6 +3698,14 @@ fn invoke_rust_for_remote(
             let value = crate::async_rt::block_on(git_cmd::git_get_log_native(cwd, count));
             to_json_value(channel, value)
         }),
+        "git:graph-log" => string_param(params, "cwd", channel).and_then(|cwd| {
+            let count = params.get("count").and_then(Value::as_i64);
+            let scope = optional_string_param(params, "scope");
+            let value = crate::async_rt::block_on(git_cmd::git_get_graph_log_native(
+                cwd, count, scope,
+            ));
+            to_json_value(channel, value)
+        }),
         "git:diff" => string_param(params, "cwd", channel).and_then(|cwd| {
             let commit_hash = optional_string_param(params, "commitHash");
             let file_path = optional_string_param(params, "filePath");

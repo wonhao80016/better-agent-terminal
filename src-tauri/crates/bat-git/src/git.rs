@@ -1,5 +1,6 @@
 use bat_host_support::subprocess::hide_console_window;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -20,6 +21,27 @@ pub struct GitLogEntry {
 pub struct GitFileEntry {
     pub status: String,
     pub file: String,
+}
+
+/// A ref decorating a graph log commit. `kind` is one of "head" (detached
+/// HEAD), "branch", "remote", "tag" or "other"; `current` marks the branch
+/// HEAD points at.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct GitGraphRef {
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub current: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct GitGraphLogEntry {
+    pub hash: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<GitGraphRef>,
+    pub author: String,
+    pub date: String,
+    pub message: String,
 }
 
 // Run git with the given args in `cwd`, returning stdout as a UTF-8
@@ -68,6 +90,61 @@ pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Same contract as `run_git`, but stdout is drained on a separate thread so
+/// output larger than the pipe buffer cannot stall git until the timeout.
+pub fn run_git_capture(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    if cwd.trim().is_empty() || !Path::new(cwd).is_dir() {
+        return None;
+    }
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    let mut child = command.spawn().ok()?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout
+            .take(MAX_OUTPUT_BYTES as u64 + 1)
+            .read_to_end(&mut buffer)
+            .map(|_| buffer)
+    });
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Do not join the reader: on Windows `git` can be a wrapper whose
+                // own child survives the kill and keeps the pipe open until it ends.
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+
+    let stdout = reader.join().ok()?.ok()?;
+    if !status.success() || stdout.len() > MAX_OUTPUT_BYTES {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 // `git remote get-url origin` returns the remote URL; we only
@@ -213,6 +290,108 @@ pub fn build_diff_files_args<'a>(commit_hash: Option<&'a str>) -> Vec<String> {
 pub fn clamp_log_count(count: Option<i64>) -> u32 {
     let raw = count.unwrap_or(50);
     raw.clamp(1, 500) as u32
+}
+
+const GRAPH_FIELD_SEPARATOR: char = '\x1f';
+
+/// Argv for the graph log. `scope` "all" walks local branches, remote-tracking
+/// branches, tags and HEAD; anything else walks HEAD only, like `git log`.
+pub fn build_graph_log_args(count: Option<i64>, scope: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        "--date-order".into(),
+        "--decorate=full".into(),
+        "--no-show-signature".into(),
+        "--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s".into(),
+        "-n".into(),
+        clamp_log_count(count).to_string(),
+    ];
+    if scope == Some("all") {
+        // `--ignore-missing` only applies to revisions that follow it.
+        for arg in ["--ignore-missing", "--branches", "--remotes", "--tags", "HEAD"] {
+            args.push(arg.into());
+        }
+    }
+    args.push("--".into());
+    args
+}
+
+/// Parse `build_graph_log_args` output. Lines that are not commit records,
+/// such as gpg output from `log.showSignature`, are skipped.
+pub fn parse_graph_log(raw: &str) -> Vec<GitGraphLogEntry> {
+    raw.lines().filter_map(parse_graph_log_line).collect()
+}
+
+fn parse_graph_log_line(line: &str) -> Option<GitGraphLogEntry> {
+    let mut fields = line.splitn(6, GRAPH_FIELD_SEPARATOR);
+    let hash = fields.next()?;
+    let parents = fields.next()?;
+    let decorations = fields.next()?;
+    let author = fields.next()?;
+    let date = fields.next()?;
+    let message = fields.next()?;
+    if !is_object_id(hash) {
+        return None;
+    }
+    Some(GitGraphLogEntry {
+        hash: hash.to_string(),
+        parents: parents.split_whitespace().map(str::to_string).collect(),
+        refs: parse_graph_decorations(decorations),
+        author: author.to_string(),
+        date: date.to_string(),
+        message: message.to_string(),
+    })
+}
+
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+// `%D` with `--decorate=full`. Ref names cannot contain spaces, so ", " only
+// ever separates entries.
+fn parse_graph_decorations(raw: &str) -> Vec<GitGraphRef> {
+    raw.split(", ")
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry == "HEAD" {
+                return Some(GitGraphRef {
+                    kind: "head".into(),
+                    name: "HEAD".into(),
+                    current: false,
+                });
+            }
+            if let Some(target) = entry.strip_prefix("HEAD -> ") {
+                return parse_full_ref_name(target).map(|graph_ref| GitGraphRef {
+                    current: true,
+                    ..graph_ref
+                });
+            }
+            parse_full_ref_name(entry.strip_prefix("tag: ").unwrap_or(entry))
+        })
+        .collect()
+}
+
+// Markers that are not refs, such as "grafted" or "replaced", yield None.
+fn parse_full_ref_name(full_name: &str) -> Option<GitGraphRef> {
+    let (kind, name) = if let Some(name) = full_name.strip_prefix("refs/heads/") {
+        ("branch", name)
+    } else if let Some(name) = full_name.strip_prefix("refs/remotes/") {
+        ("remote", name)
+    } else if let Some(name) = full_name.strip_prefix("refs/tags/") {
+        ("tag", name)
+    } else if let Some(name) = full_name.strip_prefix("refs/") {
+        ("other", name)
+    } else {
+        return None;
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(GitGraphRef {
+        kind: kind.into(),
+        name: name.into(),
+        current: false,
+    })
 }
 
 #[cfg(test)]
@@ -440,5 +619,197 @@ mod tests {
             Duration::from_secs(1),
         )
         .is_none());
+    }
+
+    const HASH_A: &str = "1111111111111111111111111111111111111111";
+    const HASH_B: &str = "2222222222222222222222222222222222222222";
+    const HASH_C: &str = "3333333333333333333333333333333333333333";
+
+    fn graph_line(hash: &str, parents: &str, refs: &str, message: &str) -> String {
+        format!("{hash}\x1f{parents}\x1f{refs}\x1fAlice\x1f2026-11-10T10:00:00+08:00\x1f{message}")
+    }
+
+    fn graph_ref(kind: &str, name: &str, current: bool) -> GitGraphRef {
+        GitGraphRef {
+            kind: kind.into(),
+            name: name.into(),
+            current,
+        }
+    }
+
+    #[test]
+    fn build_graph_log_args_for_current_scope() {
+        let args = build_graph_log_args(None, None);
+        assert_eq!(
+            args,
+            vec![
+                "log",
+                "--date-order",
+                "--decorate=full",
+                "--no-show-signature",
+                "--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s",
+                "-n",
+                "50",
+                "--",
+            ]
+        );
+        assert_eq!(build_graph_log_args(Some(10), Some("current"))[6], "10");
+        assert_eq!(
+            build_graph_log_args(Some(10), Some("bogus")),
+            build_graph_log_args(Some(10), None)
+        );
+        assert_eq!(build_graph_log_args(Some(99_999), None)[6], "500");
+    }
+
+    #[test]
+    fn build_graph_log_args_for_all_scope_orders_ignore_missing_first() {
+        let args = build_graph_log_args(Some(100), Some("all"));
+        let position = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
+        assert_eq!(args[6], "100");
+        for revision in ["--branches", "--remotes", "--tags", "HEAD"] {
+            assert!(position("--ignore-missing") < position(revision), "{revision}");
+        }
+        assert_eq!(args.last().map(String::as_str), Some("--"));
+        assert!(!args.iter().any(|arg| arg == "--all"));
+    }
+
+    #[test]
+    fn parse_graph_log_reads_parents_and_message() {
+        let raw = [
+            graph_line(HASH_A, &format!("{HASH_B} {HASH_C}"), "", "Merge branch 'x'"),
+            graph_line(HASH_B, HASH_C, "", "feat: a \x1f b || c"),
+            graph_line(HASH_C, "", "", "root"),
+        ]
+        .join("\n");
+        let entries = parse_graph_log(&raw);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].parents, vec![HASH_B.to_string(), HASH_C.to_string()]);
+        assert_eq!(entries[0].author, "Alice");
+        assert_eq!(entries[0].date, "2026-11-10T10:00:00+08:00");
+        assert_eq!(entries[1].parents, vec![HASH_C.to_string()]);
+        assert_eq!(entries[1].message, "feat: a \x1f b || c");
+        assert!(entries[2].parents.is_empty());
+        assert_eq!(parse_graph_log(""), Vec::<GitGraphLogEntry>::new());
+    }
+
+    #[test]
+    fn parse_graph_log_classifies_refs() {
+        let refs = "HEAD -> refs/heads/feat/git-graph, refs/remotes/origin/HEAD, \
+                    refs/remotes/origin/main, tag: refs/tags/v3.2.18, refs/heads/main, \
+                    refs/stash, grafted, replaced";
+        let entries = parse_graph_log(&graph_line(HASH_A, "", refs, "m"));
+        assert_eq!(
+            entries[0].refs,
+            vec![
+                graph_ref("branch", "feat/git-graph", true),
+                graph_ref("remote", "origin/HEAD", false),
+                graph_ref("remote", "origin/main", false),
+                graph_ref("tag", "v3.2.18", false),
+                graph_ref("branch", "main", false),
+                graph_ref("other", "stash", false),
+            ]
+        );
+        let detached = parse_graph_log(&graph_line(HASH_B, "", "HEAD, refs/heads/main", "m"));
+        assert_eq!(
+            detached[0].refs,
+            vec![graph_ref("head", "HEAD", false), graph_ref("branch", "main", false)]
+        );
+    }
+
+    #[test]
+    fn parse_graph_log_skips_lines_that_are_not_records() {
+        let raw = [
+            "gpg: Signature made Mon Nov 10 10:00:00 2026".to_string(),
+            graph_line(HASH_A, "", "", "kept"),
+            graph_line("not-a-hash", "", "", "dropped"),
+            format!("{HASH_B}\x1f{HASH_C}\x1fmissing fields"),
+        ]
+        .join("\n");
+        let entries = parse_graph_log(&raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "kept");
+    }
+
+    #[test]
+    fn parse_graph_log_accepts_sha256_ids_and_crlf() {
+        let sha256 = "a".repeat(64);
+        let raw = format!(
+            "{}\r\n{}",
+            graph_line(&sha256, "", "", "x"),
+            graph_line(HASH_A, &sha256, "", "y")
+        );
+        let entries = parse_graph_log(&raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].message, "x");
+        assert_eq!(entries[1].parents, vec![sha256]);
+    }
+
+    #[test]
+    fn run_git_capture_rejects_invalid_cwd() {
+        assert!(run_git_capture("", &["status"], Duration::from_secs(1)).is_none());
+        assert!(run_git_capture(
+            "C:/this/path/should/never/exist/abc123",
+            &["status"],
+            Duration::from_secs(1),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn run_git_capture_reads_output_larger_than_the_pipe_buffer() {
+        let git_available = Command::new("git")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !git_available {
+            return;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let repo = std::env::temp_dir().join(format!(
+            "bat-git-capture-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&repo).expect("create fixture repo");
+        let message_path = repo.join("message.txt");
+        std::fs::write(&message_path, "graph capture line\n".repeat(8_000)).expect("write message");
+        let repo_dir = repo.to_str().expect("utf-8 temp path");
+        let hooks_path = format!("core.hooksPath={}", repo.join("no-hooks").display());
+        let message_file = message_path.to_str().expect("utf-8 message path");
+        let timeout = Duration::from_secs(60);
+
+        let init = run_git_capture(repo_dir, &["init", "-q"], timeout);
+        let commit = run_git_capture(
+            repo_dir,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                &hooks_path,
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-F",
+                message_file,
+            ],
+            timeout,
+        );
+        let log = run_git_capture(repo_dir, &["log", "-n", "1", "--pretty=format:%B"], timeout);
+        let _ = std::fs::remove_dir_all(&repo);
+
+        assert!(init.is_some(), "git init failed");
+        assert!(commit.is_some(), "git commit failed");
+        let log = log.expect("large git output is captured");
+        assert!(log.len() > 100_000, "captured {} bytes", log.len());
+        assert!(log.starts_with("graph capture line"));
     }
 }

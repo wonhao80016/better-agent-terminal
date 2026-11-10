@@ -515,6 +515,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "git:get-github-url" => Some(&["folderPath"]),
         "git:branch" | "git:status" | "git:getRoot" => Some(&["cwd"]),
         "git:log" => Some(&["cwd", "count"]),
+        "git:graph-log" => Some(&["cwd", "count", "scope"]),
         "git:diff" => Some(&["cwd", "commitHash", "filePath"]),
         "git:diff-files" => Some(&["cwd", "commitHash"]),
         "fs:readdir" | "fs:isDirectory" | "fs:search" | "fs:watch" | "fs:unwatch"
@@ -943,6 +944,28 @@ mod tests {
         assert_eq!(
             legacy_v1_args_to_params("agent:get-supported-efforts", &[json!("session-1")]),
             json!({ "sessionId": "session-1" })
+        );
+    }
+
+    #[test]
+    fn git_log_channels_map_positional_args() {
+        assert_eq!(
+            legacy_v1_args_to_params("git:log", &[json!("/repo"), json!(25)]),
+            json!({ "cwd": "/repo", "count": 25 })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "git:graph-log",
+                &[json!("/repo"), json!(150), json!("all")]
+            ),
+            json!({ "cwd": "/repo", "count": 150, "scope": "all" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "git:graph-log",
+                &[json!("/repo"), Value::Null, Value::Null]
+            ),
+            json!({ "cwd": "/repo", "count": null, "scope": null })
         );
     }
 

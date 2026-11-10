@@ -16,10 +16,11 @@ use crate::commands::profile as profile_cmd;
 use crate::remote_client::RustRemoteClientState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
-use bat_git::git::run_git;
+use bat_git::git::{run_git, run_git_capture};
 pub use bat_git::git::{
-    build_diff_args, build_diff_files_args, clamp_log_count, parse_diff_files, parse_github_url,
-    parse_log, parse_status, GitFileEntry, GitLogEntry,
+    build_diff_args, build_diff_files_args, build_graph_log_args, clamp_log_count,
+    parse_diff_files, parse_github_url, parse_graph_log, parse_log, parse_status, GitFileEntry,
+    GitGraphLogEntry, GitLogEntry,
 };
 #[cfg(feature = "desktop")]
 use serde::de::DeserializeOwned;
@@ -181,6 +182,49 @@ pub(crate) async fn git_get_log_native(cwd: String, count: Option<i64>) -> Vec<G
         Some(raw) => parse_log(&raw),
         None => Vec::new(),
     }
+}
+
+// None means the graph is unavailable (git failed, timed out, or a remote host
+// without `git:graph-log`); the renderer then keeps the plain `git_get_log` list.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn git_get_graph_log(
+    app: AppHandle,
+    window: WebviewWindow,
+    cwd: String,
+    count: Option<i64>,
+    scope: Option<String>,
+) -> Option<Vec<GitGraphLogEntry>> {
+    if let Some(result) = remote_invoke_for_window(
+        &app,
+        &window,
+        "git:graph-log",
+        vec![json!(cwd.clone()), json!(count), json!(scope.clone())],
+    )
+    .await
+    {
+        return result
+            .and_then(from_remote_value::<Option<Vec<GitGraphLogEntry>>>)
+            .ok()
+            .flatten();
+    }
+    git_get_graph_log_native(cwd, count, scope).await
+}
+
+pub(crate) async fn git_get_graph_log_native(
+    cwd: String,
+    count: Option<i64>,
+    scope: Option<String>,
+) -> Option<Vec<GitGraphLogEntry>> {
+    let args = build_graph_log_args(count, scope.as_deref());
+    let raw = crate::async_rt::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_git_capture(&cwd, &refs, Duration::from_secs(5))
+    })
+    .await
+    .ok()
+    .flatten()?;
+    Some(parse_graph_log(&raw))
 }
 
 #[cfg(feature = "desktop")]
