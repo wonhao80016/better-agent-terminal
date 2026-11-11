@@ -4,7 +4,7 @@
 // waking the Node sidecar for local worktree creation/status/cleanup while
 // preserving the renderer-facing worktree.* result shapes.
 
-use bat_host_support::subprocess::hide_console_window;
+use bat_host_support::subprocess::{hide_console_window, ProcessTree};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -207,22 +207,20 @@ fn run_git(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    hide_console_window(&mut command);
-    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let mut tree = ProcessTree::spawn(&mut command).map_err(|err| err.to_string())?;
     let started = Instant::now();
     loop {
-        match child.try_wait() {
+        match tree.child().try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.kill();
                 return Err("git command timed out".into());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(err) => return Err(err.to_string()),
         }
     }
-    let output = child.wait_with_output().map_err(|err| err.to_string())?;
+    let output = tree.wait_with_output().map_err(|err| err.to_string())?;
     if output.stdout.len() > max_bytes {
         return Err("git output exceeded buffer limit".into());
     }

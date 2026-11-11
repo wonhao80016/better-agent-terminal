@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bat_host_support::subprocess::hide_console_window;
+use bat_host_support::subprocess::{hide_console_window, ProcessTree};
 
 use crate::paths::{
     display_name, normalize_path, strip_verbatim_prefix, to_host_separators, PathStyle,
@@ -180,23 +180,22 @@ pub(crate) fn run_git_common_dir(dir: &str) -> GitOutcome {
         "--git-common-dir",
         "--show-toplevel",
     ];
-    let Ok(mut child) = git_command(&args).spawn() else {
+    let Ok(mut tree) = ProcessTree::spawn(&mut git_command(&args)) else {
         return GitOutcome::Unavailable;
     };
     let started = Instant::now();
     let status = loop {
-        match child.try_wait() {
+        match tree.child().try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < GIT_TIMEOUT => thread::sleep(GIT_POLL_INTERVAL),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.kill();
                 return GitOutcome::NoRepository;
             }
         }
     };
     let mut stdout = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
+    if let Some(mut pipe) = tree.child().stdout.take() {
         let _ = pipe.read_to_string(&mut stdout);
     }
     parse_rev_parse_output(&stdout, status.success())

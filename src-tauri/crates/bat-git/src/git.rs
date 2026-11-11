@@ -1,4 +1,4 @@
-use bat_host_support::subprocess::hide_console_window;
+use bat_host_support::subprocess::ProcessTree;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
@@ -58,11 +58,9 @@ pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    hide_console_window(&mut command);
-    let mut child = command.spawn().ok()?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+    let mut tree = ProcessTree::spawn(&mut command).ok()?;
+    let Some(stdout) = tree.child().stdout.take() else {
+        tree.kill();
         return None;
     };
     let reader = std::thread::spawn(move || {
@@ -75,19 +73,17 @@ pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
 
     let start = std::time::Instant::now();
     let status = loop {
-        match child.try_wait() {
+        match tree.child().try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                // Do not join the reader: on Windows `git` can be a wrapper whose
-                // own child survives the kill and keeps the pipe open until it ends.
+                tree.kill();
+                // Do not join the reader: without a job object a descendant can
+                // outlive the kill and keep the pipe open until it ends.
                 return None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.kill();
                 return None;
             }
         }

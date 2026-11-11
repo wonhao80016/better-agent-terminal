@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [features]
-default = ["native-keyring", "secret-storage", "network"]
+default = ["native-keyring", "secret-storage", "network", "process-tree"]
 native-keyring = [
     "dep:keyring-core",
     "dep:windows-native-keyring-store",
@@ -17,6 +17,7 @@ secret-storage = [
     "dep:rand", "dep:serde", "dep:serde_json", "dep:sha1", "dep:windows-sys",
 ]
 network = ["dep:get_if_addrs", "dep:serde"]
+process-tree = ["dep:windows-sys"]
 
 [dependencies]
 aes = { version = "0.8", optional = true }
@@ -33,7 +34,15 @@ sha1 = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.0.0", optional = true }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"], optional = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"], optional = true }

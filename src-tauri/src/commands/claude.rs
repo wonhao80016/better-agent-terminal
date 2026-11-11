@@ -24,7 +24,7 @@ use crate::host_context::HostContext;
 use crate::remote_client::RustRemoteClientState;
 use crate::remote_core::remote_agent_channel;
 use crate::sidecar::{BridgeError, SidecarState};
-use crate::subprocess::hide_console_window;
+use crate::subprocess::{hide_console_window, ProcessTree};
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 use flate2::read::GzDecoder;
@@ -1946,22 +1946,20 @@ fn run_git_in_dir(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    hide_console_window(&mut command);
-    let mut child = command.spawn().ok()?;
+    let mut tree = ProcessTree::spawn(&mut command).ok()?;
     let started = Instant::now();
     loop {
-        match child.try_wait() {
+        match tree.child().try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.kill();
                 return None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(_) => return None,
         }
     }
-    let output = child.wait_with_output().ok()?;
+    let output = tree.wait_with_output().ok()?;
     if !output.status.success() || output.stdout.len() > max_bytes {
         return None;
     }
@@ -1979,18 +1977,16 @@ fn run_git_status_in_dir(cwd: &Path, args: &[&str], timeout: Duration) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    hide_console_window(&mut command);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let mut tree = match ProcessTree::spawn(&mut command) {
+        Ok(tree) => tree,
         Err(_) => return false,
     };
     let started = Instant::now();
     loop {
-        match child.try_wait() {
+        match tree.child().try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                tree.kill();
                 return false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
