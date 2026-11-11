@@ -2,7 +2,7 @@
 
 Git 頁面的 commit 清單加上分支線圖（git graph），呈現方式參考 VS Code Git Graph：每個 commit 是一個節點，分支、合併以彩色車道線連接，並在訊息前標示 branch 與 tag。
 
-- 狀態：P0–P6 已完成並通過驗證（第 11 節）；第 9 節的決策已由使用者確認（2026-11-11）。
+- 狀態：P0–P6 已完成並通過驗證（第 11 節）；第 9 節 D1–D5 已由使用者確認（2026-11-11），D6 待決策。
 - 基準：本文件的檔案行號以 commit `a89b44e`（`local-dev`）為準。
 - 實作分支：`feat/git-graph`。
 
@@ -147,7 +147,7 @@ pub struct GitGraphLogEntry {
 
 - stdout 由另一個執行緒持續讀取，上限沿用 `MAX_OUTPUT_BYTES`（5 MiB）。
 - 主執行緒照舊輪詢 `try_wait` 做逾時判斷。
-- 逾時：kill 直接子行程後**立即回傳 `None`，不 join 讀取執行緒**。在 Windows 上，wrapper 啟動的真正 git 會繼續跑完並持有 pipe，join 會讓呼叫端一直等下去。殘留的 git 在自己結束後釋放 pipe，讀取執行緒隨之結束。
+- 逾時：kill 直接子行程後**立即回傳 `None`，不 join 讀取執行緒**。在 Windows 上，wrapper 啟動的真正 git 會繼續跑完並持有 pipe，join 會讓呼叫端一直等下去。殘留的 git 結束後才釋放 pipe，讀取執行緒隨之結束；git 本身卡住時它不會結束（見 R6、D6）。
 - 正常結束：join 讀取執行緒；exit code 非 0、讀取失敗或超過上限都回 `None`。
 
 修正後，超過門檻的 diff 會實際顯示出來；接近 5 MiB 上限的 diff 可能讓 diff 畫面變慢。worktree 功能另有一個私有的同名函式（`src-tauri/crates/bat-git/src/worktree.rs:194`），寫法相同，不在 D2 範圍內，未修改。
@@ -228,7 +228,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | graph 開關 | 標題列的分支圖示按鈕，開啟時以強調色顯示；存在 `localStorage` 的 `better-terminal-git-graph-enabled`，預設開啟。關閉時：清除 graph 與進行中的 graph 請求、回到原本的清單樣式，之後的載入**不再取 graph**；選取的 commit 不在原清單中才清除。重新開啟時清除該 path 的失敗紀錄並重新取得。開關在 graph 可用、使用者已關閉、或切換進行中時顯示；graph 開啟但取不到時隱藏，以符合 I2 |
 | Fallback 模式 | 與現在完全相同：無 graph、無範圍切換、無載入更多、無 graph 開關 |
 
-新增 i18n key（四個語系）：`git.scopeCurrent`、`git.scopeAll`、`git.scopeToggleTitle`、`git.loadMore`。
+新增 i18n key（四個語系）：`git.scopeCurrent`、`git.scopeAll`、`git.scopeToggleTitle`、`git.loadMore`、`git.showGraph`、`git.hideGraph`。
 
 ### 5.7 效能與資源
 
@@ -278,7 +278,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | R3 | commit 欄很窄時 graph 佔太多空間 | graph 寬度上限為列寬 40%，超出裁切，被裁掉欄位的節點不顯示 |
 | R4 | macOS WKWebView、Linux WebKitGTK 的呈現差異 | 只用標準 SVG 屬性與 CSS `min()`；無實機可驗，列為限制 |
 | R5 | graph 模式下選取列的左側色條改用 box-shadow | 視覺相同、不位移；fallback 模式不受影響 |
-| R6 | 逾時時 Windows 上殘留真正的 git 行程 | 它會自己跑完並釋放 pipe；R1 的失敗紀錄讓它每個 path 每工作階段最多出現一次 |
+| R6 | 逾時時 Windows 上殘留真正的 git 行程 | 正常情況下它跑完就結束；git 本身卡住時會一直存在。這是既有「逾時只結束 wrapper」做法的限制，本分支沒有改變：2026-11-11 本機實測有 84 個 `git rev-parse --abbrev-ref HEAD` 卡住（CPU 0、合計約 330 MB），父行程都已結束，來自讀取分支的既有呼叫。graph 的失敗紀錄讓 graph 每個 path 每工作階段最多貢獻一個；整體修正見 D6 |
 
 ## 9. 使用者決策
 
@@ -290,6 +290,12 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | D2 | 是否修正既有 `run_git` 大輸出卡死（超過約 64 KB 的 diff 會變成空白） | 修正，在本分支以獨立 commit 進行（5.2、P5） |
 | D3 | 是否需要完全關閉 graph 的開關 | 加入標題列開關，關閉時回到原本的清單樣式並記住選擇（5.6、P6） |
 | D5 | 「全部分支」是否包含遠端分支與 tag | 包含，與附圖一致 |
+
+待決策：
+
+| # | 決策 | 現況 |
+|---|---|---|
+| D6 | 是否修正「逾時只結束 wrapper、卡住的 git 永遠殘留」（例如改用 Job Object 連同子行程一起結束），以及是否追查 `git rev-parse` 卡住的原因（本機家目錄位於網路磁碟，未查證是否相關） | 未處理；屬既有行為，影響所有 git 呼叫，不只 graph |
 
 已自行決定的實作參數：「載入更多」初始 50、每次 +100、最多 500；初次顯示等待 graph 的上限 300 ms（理由見 5.6）。
 
