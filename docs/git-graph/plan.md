@@ -269,11 +269,11 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | P2 資料與演算法 | `host.git.getGraphLog` 與 git 方法註解；`tests/host-api.test.ts`；`renderer/src/lib/git-graph.ts`；`tests/git-graph.test.ts`；`package.json` 新增 `test:git-graph` 並串進 `verify:tauri-pre-ci` | tsc、`test:git-graph`、host-api 測試 |
 | P3 UI | `GitGraph.tsx`（cell 與 ref 標籤）、`GitPanel.tsx` 整合（漸進載入、失敗處理、範圍切換、載入更多、未提交節點）、CSS、四語系 i18n | tsc、compile、視覺截圖 |
 | P4 收尾 | 全面驗證、獨立驗收、修正、更新本文件狀態 | 第 6 節全部項目 |
-| P5（D2） | `run_git` 改為邊讀邊等，`run_git_capture` 併入；大輸出測試改測 `run_git` 並加入大 diff | 修正前後各跑一次該測試；`cargo check`、headless check、workspace 測試 |
-| P6（D3） | graph 開關、設定值解析與測試、i18n | tsc、compile、`test:git-graph`、標題列截圖 |
-| P7（D6） | `bat-host-support` 新增 `ProcessTree`（`process-tree` 功能，預設開啟）；5 個逾時會結束 git 的 runner 改用它 | Windows 行程樹測試（含 git shim）、修正前後的孤兒重現、workspace 測試、獨立驗收 |
-| P8（D7） | `bat-git` 新增 `head::lookup_head`，`git_get_branch_native` 先讀 repo 檔案，只有遇到不處理的情況才執行 git | 檔案結構單元測試、與 `git rev-parse` 逐狀態比對的實際 repo 測試、本機 4 個工作區比對 |
-| P9（D7） | 「Not a git repository」畫面加重新整理按鈕 | tsc、compile、畫面截圖 |
+| P5（D2，`f68418d`） | `run_git` 改為邊讀邊等，`run_git_capture` 併入；大輸出測試改測 `run_git` 並加入大 diff | 修正前後各跑一次該測試；`cargo check`、headless check、workspace 測試 |
+| P6（D3，`75fb78c`） | graph 開關、設定值解析與測試、i18n | tsc、compile、`test:git-graph`、標題列截圖 |
+| P7（D6，`25f8b31`、`65135e9`） | `bat-host-support` 新增 `ProcessTree`（`process-tree` 功能，預設開啟）；5 個逾時會結束 git 的 runner 改用它 | Windows 行程樹測試（含 git shim）、修正前後的孤兒重現、workspace 測試、獨立驗收 |
+| P8（D7，`ede8885`、`6d9f789`） | `bat-git` 新增 `head::lookup_head`，`git_get_branch_native` 先讀 repo 檔案，有任何疑慮才執行 git | 檔案結構單元測試、與 `git rev-parse` 逐狀態比對的實際 repo 測試、本機 4 個工作區比對、獨立驗收（77 種情境） |
+| P9（D7，`e3dbe07`） | 「Not a git repository」畫面加重新整理按鈕 | tsc、compile、畫面截圖 |
 
 ## 8. 風險
 
@@ -334,11 +334,23 @@ P4 由 fresh-context 驗收 agent（逐條驗收條件）與審查 agent（diff 
 | 輕微 | 兩段文件註解連同分隔符超過 3 行；記錄函式拋錯會讓 `load` reject | 改為 2 行註解；記錄函式的例外在內部攔截 |
 | 輕微 | 舊 host 呼叫次數與 `+N` 提示的文件措辭和實作不符 | 修正 5.3、5.6 的措辭 |
 
+P8 的獨立驗收（2026-11-11）用真實 git 建立 77 種情境，逐一比對 `lookup_head` 與 `git rev-parse --abbrev-ref HEAD`：55 種相同、10 種交給 git，12 種不同。原則改為「有任何疑慮就交給 git」後修正如下；新增的測試在修正前的實作上有 5 個失敗，修正後全部通過：
+
+| 發現 | 處理 |
+|---|---|
+| 經由 junction、symlink、`..` 或相對路徑進入時，照字面往上找；git 會先解析成實際路徑（例如 junction 指向另一個 repo 時讀到錯的分支） | 先 `canonicalize` 成實際路徑再往上找；組合路徑時逐段處理，避免 Windows `\\?\` 路徑把 `..` 與 `/` 當成字面 |
+| 目前目錄有名為 `HEAD` 的項目時，git 會把 `HEAD` 當成路徑（還沒有 commit 時輸出 `HEAD` 並成功） | 一律交給 git |
+| 分支 ref 本身是 symbolic ref、內容為空或損毀、hash 長度與 repo 格式不符 | 驗證 loose ref 與 detached HEAD 的內容是該 repo 長度的 hash（讀 `extensions.objectformat`），否則交給 git |
+| `gitdir:` 後沒有空白也被接受，git 會視為格式錯誤 | 和 git 一樣只接受 `gitdir: ` |
+| bare repo 受 `safe.bareRepository` 影響；未知的 repo extension 或格式版本會被 git 拒絕 | bare repo、未知 extension、`repositoryformatversion` > 1 都交給 git |
+| 背景讀取失敗時直接回傳 `None` | 改為交給 git |
+| phase table 沒有 commit hash | 已補上 |
+
 ## 11. 實作與驗證結果
 
 ### 11.1 實作內容
 
-commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`）、`65135e9`（P7 效能修正：改用 `NtResumeProcess`）、`775d68f`（文件）、`a11e5a6`（驗收小修）、`ede8885`（P8，D7：直接讀 HEAD）、`e3dbe07`（P9，D7：重新整理按鈕），之後是本文件的結果更新。
+commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`）、`65135e9`（P7 效能修正：改用 `NtResumeProcess`）、`775d68f`（文件）、`a11e5a6`（驗收小修）、`ede8885`（P8，D7：直接讀 HEAD）、`e3dbe07`（P9，D7：重新整理按鈕）、`44cde28`（文件）、`6d9f789`（P8 驗收修正：有疑慮就交給 git），之後是本文件的結果更新。
 
 | 層 | 檔案 |
 |---|---|
@@ -368,7 +380,7 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 | 直接讀 HEAD（P8） | 9 個 `head` 測試通過，其中實際 repo 測試在每個狀態（還沒有 commit、一般分支、子目錄、名稱含 `/`、packed-refs、linked worktree、detached HEAD）都與 `git rev-parse --abbrev-ref HEAD` 相同；分支與 tag 同名時退回 git，git 輸出 `heads/feat/x` |
 | 本機工作區比對（P8） | BAT 設定的 4 個工作區結果都與 git 相同：`moc_refactor` `main`、`driver` `fix/s4-resume-pending-capture`、`better-agent-terminal` `feat/git-graph`、`d:\claude` 不是 repo；每次 0.4–10 ms，git 為 0.9–1.1 秒 |
 | 重新整理按鈕（P9） | tsc、compile 與 renderer 測試通過；截圖確認訊息下方置中顯示按鈕 |
-| `cargo test --workspace --lib`（P8 後） | 756 個全部通過（多出的 9 個是 `head` 測試）；`Cargo.lock` 沒有變動 |
+| `cargo test --workspace --lib`（P8 後） | 756 個全部通過（多出的 9 個是 `head` 測試）；P8 驗收修正後為 758 個（`head` 測試增為 11 個，含 junction 與真實 repo 的 HEAD 檔案情境；修正前的實作有其中 5 個失敗）；`Cargo.lock` 沒有變動 |
 
 環境備註：主 crate 的 `supported_agents_native_reads_frontmatter` 與 `bat-agent-bridge` 的 `end_to_end_bundled_sdk_loads_through_bundled_node` 會讀使用者家目錄，在 PowerShell 環境可能失敗；`bat-session-index` 有 3 個測試在 TEMP 為 8.3 短路徑時失敗（`a89b44e` 之前就如此）。這些都與本功能無關，在 Git Bash、長路徑 TEMP 下以同一份程式碼重跑會通過。測試 `ProcessTree` 的 git shim 情境要在系統 PATH（PowerShell）下執行，Git Bash 的 PATH 會直接找到真正的 git 而略過該測試。
 
