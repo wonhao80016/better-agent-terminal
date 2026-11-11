@@ -512,7 +512,14 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   }
 
   if (!isGitRepo) {
-    return <div className="git-panel-empty">{t('git.notAGitRepo')}</div>
+    return (
+      <div className="git-panel-empty git-panel-not-repo">
+        <span>{t('git.notAGitRepo')}</span>
+        <button type="button" className="git-panel-retry-btn" onClick={handleRefresh}>
+          {t('git.refresh')}
+        </button>
+      </div>
+    )
   }
 
   return (

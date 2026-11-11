@@ -323,6 +323,26 @@
   height: 100%;
 }
 
+.git-panel-not-repo {
+  flex-direction: column;
+  gap: 8px;
+}
+
+.git-panel-retry-btn {
+  padding: 3px 12px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.git-panel-retry-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 /* Shared column header */
 .git-col-header {
   display: flex;
