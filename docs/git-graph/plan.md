@@ -340,7 +340,7 @@ P4 由 fresh-context 驗收 agent（逐條驗收條件）與審查 agent（diff 
 
 ### 11.1 實作內容
 
-commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`），之後是本文件的結果更新。
+commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`）、`65135e9`（P7 效能修正：改用 `NtResumeProcess`）、`775d68f`（文件），以及之後的驗收小修。
 
 | 層 | 檔案 |
 |---|---|

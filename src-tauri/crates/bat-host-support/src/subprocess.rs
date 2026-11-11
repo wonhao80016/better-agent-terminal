@@ -85,8 +85,8 @@ mod job {
     };
     use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
 
-    // Undocumented ntdll export, stable since Windows XP. It resumes every thread of one
-    // process in a single call; finding the thread through a snapshot costs ~200 ms per spawn.
+    // Undocumented ntdll export, stable since Windows XP. It resumes every thread of one process
+    // in one call, unlike a Toolhelp snapshot whose cost grows with every thread on the system.
     #[link(name = "ntdll")]
     extern "system" {
         fn NtResumeProcess(process: HANDLE) -> i32;
