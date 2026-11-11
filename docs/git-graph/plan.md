@@ -2,7 +2,7 @@
 
 Git 頁面的 commit 清單加上分支線圖（git graph），呈現方式參考 VS Code Git Graph：每個 commit 是一個節點，分支、合併以彩色車道線連接，並在訊息前標示 branch 與 tag。
 
-- 狀態：P0–P6 已完成並通過驗證（第 11 節）；第 9 節 D1–D5 已由使用者確認（2026-11-11），D6 待決策。
+- 狀態：P0–P7 已完成並通過驗證（第 11 節）；第 9 節 D1–D6 已由使用者確認（2026-11-11），D7 待決策。
 - 基準：本文件的檔案行號以 commit `a89b44e`（`local-dev`）為準。
 - 實作分支：`feat/git-graph`。
 
@@ -147,10 +147,12 @@ pub struct GitGraphLogEntry {
 
 - stdout 由另一個執行緒持續讀取，上限沿用 `MAX_OUTPUT_BYTES`（5 MiB）。
 - 主執行緒照舊輪詢 `try_wait` 做逾時判斷。
-- 逾時：kill 直接子行程後**立即回傳 `None`，不 join 讀取執行緒**。在 Windows 上，wrapper 啟動的真正 git 會繼續跑完並持有 pipe，join 會讓呼叫端一直等下去。殘留的 git 結束後才釋放 pipe，讀取執行緒隨之結束；git 本身卡住時它不會結束（見 R6、D6）。
+- 逾時：以 `ProcessTree::kill` 結束整個行程樹（P7，D6），然後**立即回傳 `None`，不 join 讀取執行緒**。Job Object 無法建立時會退回只結束直接子行程；這時 wrapper 啟動的真正 git 可能仍存活並持有 pipe，join 會讓呼叫端一直等下去。
 - 正常結束：join 讀取執行緒；exit code 非 0、讀取失敗或超過上限都回 `None`。
 
-修正後，超過門檻的 diff 會實際顯示出來；接近 5 MiB 上限的 diff 可能讓 diff 畫面變慢。worktree 功能另有一個私有的同名函式（`src-tauri/crates/bat-git/src/worktree.rs:194`），寫法相同，不在 D2 範圍內，未修改。
+修正後，超過門檻的 diff 會實際顯示出來；接近 5 MiB 上限的 diff 可能讓 diff 畫面變慢。worktree 功能另有一個私有的同名函式（`src-tauri/crates/bat-git/src/worktree.rs:194`），「等結束才讀」的寫法相同，不在 D2 範圍內，未修改其讀取方式；它的逾時處理已在 P7 改用 `ProcessTree`。
+
+`ProcessTree`（`src-tauri/crates/bat-host-support/src/subprocess.rs`）在 Windows 上先建立「關閉時結束全部」的 Job Object，再以 `CREATE_SUSPENDED` 建立子行程、放進 Job 後才以 ntdll 的 `NtResumeProcess` 恢復執行，所以子行程啟動的任何行程都一定屬於這個 Job。`NtResumeProcess` 沒有正式文件，但從 Windows XP 起就一直穩定存在；改用它之前，以 Toolhelp 掃描全系統執行緒來找出要恢復的那一條，每次啟動多花約 200 ms，改用後只多約 4 ms（30 次中位數 71.7 ms，一般 spawn 67.6 ms）。`kill()` 或物件被丟棄時，Job 內所有行程（含仍處於暫停狀態的）都會結束。子行程無法恢復時會被結束並回報錯誤，絕不留下暫停的行程；Job 無法建立時退回原本的做法。副作用：git 自己啟動、原本會常駐的背景程式（例如啟用 `core.fsmonitor` 時的 fsmonitor 常駐程式）會隨該次呼叫結束，下次再啟動。
 
 ### 5.3 IPC 與遠端
 
@@ -268,6 +270,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | P4 收尾 | 全面驗證、獨立驗收、修正、更新本文件狀態 | 第 6 節全部項目 |
 | P5（D2） | `run_git` 改為邊讀邊等，`run_git_capture` 併入；大輸出測試改測 `run_git` 並加入大 diff | 修正前後各跑一次該測試；`cargo check`、headless check、workspace 測試 |
 | P6（D3） | graph 開關、設定值解析與測試、i18n | tsc、compile、`test:git-graph`、標題列截圖 |
+| P7（D6） | `bat-host-support` 新增 `ProcessTree`（`process-tree` 功能，預設開啟）；5 個逾時會結束 git 的 runner 改用它 | Windows 行程樹測試（含 git shim）、修正前後的孤兒重現、workspace 測試、獨立驗收 |
 
 ## 8. 風險
 
@@ -278,7 +281,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | R3 | commit 欄很窄時 graph 佔太多空間 | graph 寬度上限為列寬 40%，超出裁切，被裁掉欄位的節點不顯示 |
 | R4 | macOS WKWebView、Linux WebKitGTK 的呈現差異 | 只用標準 SVG 屬性與 CSS `min()`；無實機可驗，列為限制 |
 | R5 | graph 模式下選取列的左側色條改用 box-shadow | 視覺相同、不位移；fallback 模式不受影響 |
-| R6 | 逾時時 Windows 上殘留真正的 git 行程 | 正常情況下它跑完就結束；git 本身卡住時會一直存在。這是既有「逾時只結束 wrapper」做法的限制，本分支沒有改變：2026-11-11 本機實測有 84 個 `git rev-parse --abbrev-ref HEAD` 卡住（CPU 0、合計約 330 MB），父行程都已結束，來自讀取分支的既有呼叫。graph 的失敗紀錄讓 graph 每個 path 每工作階段最多貢獻一個；整體修正見 D6 |
+| R6 | 逾時時 Windows 上殘留真正的 git 行程 | 已由 D6 修正（P7）：所有 git runner 改用 `ProcessTree`，逾時時以 Job Object 結束整個行程樹，包括仍處於暫停狀態的子行程。原因與證據見 11.4。修正前，本機 2026-11-11 量到 117 個暫停的孤兒 `git rev-parse --abbrev-ref HEAD`（約 460 MB），清除後一小時內又累積 45 個 |
 
 ## 9. 使用者決策
 
@@ -290,12 +293,13 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | D2 | 是否修正既有 `run_git` 大輸出卡死（超過約 64 KB 的 diff 會變成空白） | 修正，在本分支以獨立 commit 進行（5.2、P5） |
 | D3 | 是否需要完全關閉 graph 的開關 | 加入標題列開關，關閉時回到原本的清單樣式並記住選擇（5.6、P6） |
 | D5 | 「全部分支」是否包含遠端分支與 tag | 包含，與附圖一致 |
+| D6 | 逾時只結束 wrapper、卡住的 git 永遠殘留：是否清除現有孤兒、修正、追查原因 | 三項都做：清除本機的孤兒；以 `ProcessTree`（Job Object）修正所有 git runner（P7）；原因見 11.4 |
 
 待決策：
 
 | # | 決策 | 現況 |
 |---|---|---|
-| D6 | 是否修正「逾時只結束 wrapper、卡住的 git 永遠殘留」（例如改用 Job Object 連同子行程一起結束），以及是否追查 `git rev-parse` 卡住的原因（本機家目錄位於網路磁碟，未查證是否相關） | 未處理；屬既有行為，影響所有 git 呼叫，不只 graph |
+| D7 | 是否降低讀分支造成的行程數量。Claude／Codex agent 面板每 5 秒讀一次分支、沒有防重入，每次啟動 wrapper、conhost、git 三個行程（11.4） | 未處理。可選：直接讀 `.git/HEAD` 不開行程（效果最大，需處理 worktree、detached HEAD、reftable 退回 git）；拉長間隔並在上一次未完成時跳過；唯讀查詢直接呼叫真正的 git 略過 wrapper；逾時加大並加防重入 |
 
 已自行決定的實作參數：「載入更多」初始 50、每次 +100、最多 500；初次顯示等待 graph 的上限 300 ms（理由見 5.6）。
 
@@ -336,11 +340,12 @@ P4 由 fresh-context 驗收 agent（逐條驗收條件）與審查 agent（diff 
 
 ### 11.1 實作內容
 
-commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關），之後是本文件的決策與結果更新。
+commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`），之後是本文件的結果更新。
 
 | 層 | 檔案 |
 |---|---|
 | Rust | `src-tauri/crates/bat-git/src/git.rs`（型別、`run_git`、`build_graph_log_args`、`parse_graph_log` 與測試）、`src-tauri/src/commands/git.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/remote_server.rs`、`src-tauri/crates/bat-remote-protocol/src/remote_core.rs` |
+| Rust（P7） | `src-tauri/crates/bat-host-support/src/subprocess.rs`（`ProcessTree` 與 Windows 測試）、`src-tauri/crates/bat-host-support/Cargo.toml`、`src-tauri/crates/bat-git/src/worktree.rs`、`src-tauri/crates/bat-git/Cargo.toml`、`src-tauri/crates/bat-session-index/src/git.rs`、`src-tauri/crates/bat-session-index/Cargo.toml`、`src-tauri/src/commands/claude.rs` |
 | Renderer 邏輯 | `renderer/src/lib/git-graph.ts`、`renderer/src/lib/git-graph-source.ts`、`renderer/src/host-api.ts` |
 | Renderer UI | `renderer/src/components/GitGraph.tsx`、`renderer/src/components/GitPanel.tsx`、`renderer/src/styles/file-browser.css`、`renderer/src/locales/{en,ja,zh-CN,zh-TW}.json` |
 | 測試與腳本 | `tests/git-graph.test.ts`、`tests/host-api.test.ts`、`package.json`（`test:git-graph`，已串進 `verify:tauri-pre-ci`） |
@@ -357,8 +362,12 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 | 畫面 | 以元件與 CSS 靜態渲染本 repo 真實資料與合成多分支資料，用 Edge headless 截圖檢查：線條連續、換欄曲線、匯合、octopus、孤立 root、未提交虛線、標籤截斷與 `+N`、窄欄裁切、選取列不位移 |
 | graph 開關（P6） | 標題列三種狀態截圖：graph 開啟（範圍按鈕、強調色開關、重新整理）、使用者關閉（開關、重新整理）、fallback（只有重新整理） |
 | fallback 模式 | 驗收 agent 逐項比對：graph 不可用時，標題列與清單的結構、class、`●` 與文字都和 `a89b44e` 相同 |
+| `ProcessTree`（P7） | 4 個 Windows 測試：`kill()` 與丟棄物件都會結束孫行程、git shim 背後的真正 git 會一起結束（在系統 PATH 下執行，確認未略過）、管線輸出可正常讀完。對照組：只結束 shim 時，其子行程仍存活 |
+| 孤兒重現（P7） | 透過 shim、逾時 1–400 ms 各呼叫 56 次（全部逾時）：舊寫法留下 4 個暫停的孤兒，`run_git` 留下 0 個。獨立驗收另做三組（逾時 1–400 ms 各 192 次、150–400 ms 各 104 次、0–400 ms 結束各 82 次）：舊寫法分別留下 5、22、9 個，`run_git` 都是 0 個。改用 `NtResumeProcess` 後再跑兩輪共 112 次，仍是 0 個 |
+| 啟動成本（P7） | 以 Toolhelp 恢復執行緒時，`ProcessTree` 啟動中位數 266 ms、一般 spawn 70 ms；改用 `NtResumeProcess` 後為 71.7 ms 對 67.6 ms |
+| `cargo test --workspace --lib`（P7 後） | 747 個全部通過（多出的 4 個是 `ProcessTree` 測試）；`Cargo.lock` 沒有變動 |
 
-環境備註：主 crate 的 `supported_agents_native_reads_frontmatter` 與 `bat-agent-bridge` 的 `end_to_end_bundled_sdk_loads_through_bundled_node` 會讀使用者家目錄，在 PowerShell 環境可能失敗；這與本功能無關，在 Git Bash 下以同一份程式碼重跑會通過。
+環境備註：主 crate 的 `supported_agents_native_reads_frontmatter` 與 `bat-agent-bridge` 的 `end_to_end_bundled_sdk_loads_through_bundled_node` 會讀使用者家目錄，在 PowerShell 環境可能失敗；`bat-session-index` 有 3 個測試在 TEMP 為 8.3 短路徑時失敗（`a89b44e` 之前就如此）。這些都與本功能無關，在 Git Bash、長路徑 TEMP 下以同一份程式碼重跑會通過。測試 `ProcessTree` 的 git shim 情境要在系統 PATH（PowerShell）下執行，Git Bash 的 PATH 會直接找到真正的 git 而略過該測試。
 
 ### 11.3 未驗證
 
@@ -367,3 +376,13 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 - 在執行中的 app 內實際操作（使用者正在使用 BAT，app 為單一實例）。
 - 沒有 commit-graph 檔的超大 repo 的實際耗時。
 - 接近 5 MiB 上限的 diff 在 diff 畫面的繪製效能（P5 之後才會顯示出來）。
+- P7 要重新建置並重啟 BAT 才會生效；執行中的舊版仍會繼續產生孤兒。其他工具（例如 VS Code）留下的孤兒不受影響。
+
+### 11.4 D6 根本原因調查摘要（2026-11-11）
+
+- 孤兒的特徵：映像為 `ucrt64\bin\git.exe`，只有 1 條執行緒，處於 Wait/Suspended（suspend count 1），CPU 0，從未恢復執行；父行程（`cmd\git.exe` wrapper）已結束，並各留下一個孤兒 `conhost.exe`。
+- 機制：Windows 的 CreateProcess 會先以暫停狀態建立子行程的初始執行緒，建立完成時才由建立者恢復。wrapper 的 `CreateProcessW` 尚未完成時就被 3 秒逾時結束，子行程便停在暫停狀態。
+- 在本機，這段建立時間被安全軟體（Trend Micro Apex One、Trellix DLP）的行程建立攔截拉長。高負載時 wrapper 建立子行程要 2–3 秒，正好落在 3 秒逾時上；在一般負載下這段時間約 60–175 ms。
+- 實驗室負載下，建立者在 `CreateProcessW` 返回前被結束時，子行程通常會由系統清掉（`0xC000010A`）；現場為何沒有被清掉，未查明。但 Job Object 的做法不依賴這個清理：模擬實驗 15/15 次都結束了子行程，不用 Job 的對照組 3/3 留下孤兒。
+- 家目錄位於網路磁碟（`Z:`）：global config 確實讀 `Z:` 上的檔案，但對啟動時間的影響在誤差範圍內（中位數差 15–60 ms），不是主因。
+- 呼叫頻率：Claude 與 Codex agent 面板每 5 秒讀一次分支（`renderer/src/components/ClaudeAgentPanel.tsx`、`CodexAgentPanel.tsx`），沒有防重入；實測每分鐘 12 次，每次啟動 wrapper、conhost、git 三個行程。這是 D7 的背景。
