@@ -17,6 +17,8 @@ use crate::remote_client::RustRemoteClientState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 use bat_git::git::run_git;
+use bat_git::head::{lookup_head, HeadLookup};
+use std::path::Path;
 pub use bat_git::git::{
     build_diff_args, build_diff_files_args, build_graph_log_args, clamp_log_count,
     parse_diff_files, parse_github_url, parse_graph_log, parse_log, parse_status, GitFileEntry,
@@ -131,7 +133,18 @@ pub async fn git_get_branch(app: AppHandle, window: WebviewWindow, cwd: String) 
     git_get_branch_native(cwd).await
 }
 
+// Reading HEAD from the repository files avoids starting git, which panels poll every few
+// seconds and which can exceed the timeout on a busy machine; git runs only as a fallback.
 pub(crate) async fn git_get_branch_native(cwd: String) -> Option<String> {
+    let lookup_cwd = cwd.clone();
+    let lookup = crate::async_rt::spawn_blocking(move || lookup_head(Path::new(&lookup_cwd)))
+        .await
+        .ok()?;
+    match lookup {
+        HeadLookup::Name(name) => return Some(name),
+        HeadLookup::Missing => return None,
+        HeadLookup::AskGit => {}
+    }
     let raw = run_git_blocking(
         cwd,
         vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
