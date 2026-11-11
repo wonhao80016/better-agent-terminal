@@ -2,7 +2,7 @@
 
 Git 頁面的 commit 清單加上分支線圖（git graph），呈現方式參考 VS Code Git Graph：每個 commit 是一個節點，分支、合併以彩色車道線連接，並在訊息前標示 branch 與 tag。
 
-- 狀態：P0–P4 已完成並通過驗證（第 11 節）；第 9 節的決策待使用者確認。
+- 狀態：P0–P6 已完成並通過驗證（第 11 節）；第 9 節的決策已由使用者確認（2026-11-11）。
 - 基準：本文件的檔案行號以 commit `a89b44e`（`local-dev`）為準。
 - 實作分支：`feat/git-graph`。
 
@@ -21,14 +21,13 @@ Git 頁面的 commit 清單加上分支線圖（git graph），呈現方式參�
 - commit 右鍵操作（checkout、cherry-pick、建立分支等）、搜尋、篩選作者。
 - 虛擬捲動（500 筆以內不需要，見 5.7）。
 - 改變既有 diff 行為：merge commit 只跟第一個 parent 比、root commit 無法顯示 diff（`hash~1..hash`，`src-tauri/crates/bat-git/src/git.rs:180-190`）維持現狀。
-- 修正既有 `run_git` 大輸出卡死（見 5.2 與 D2）。
 
 ### 1.3 不變式（既有功能不能被影響）
 
 | # | 不變式 | 怎麼保證 |
 |---|---|---|
 | I1 | 既有 IPC `git_get_log` / `host.git.getLog` / 遠端 `git:log` 的名稱、參數與回傳格式不變 | 只新增指令，不修改舊指令；專案 `AGENTS.md` 的 IPC Compatibility 規定 additive-only |
-| I2 | graph 取得失敗時，Git 頁面顯示與現在完全相同的 commit 清單 | 原清單照舊取得並先顯示；graph 只在成功時替換呈現；fallback 模式不套用任何 graph 樣式 |
+| I2 | graph 開啟但取得失敗時，Git 頁面顯示與現在完全相同的 commit 清單；使用者關閉 graph 時，清單與現在相同，標題列另有 graph 開關 | 原清單照舊取得並先顯示；graph 只在成功時替換呈現；fallback 模式不套用任何 graph 樣式，也不顯示 graph 開關 |
 | I3 | 選取 commit、檔案清單、diff、檔案檢視、變更導覽、worktree 切換、欄寬調整行為不變 | 只改 commit 清單列的呈現；選取仍呼叫既有 `handleSelectCommit(hash)`；載入更多與切換範圍走獨立路徑（5.6），不清空選取、不顯示 Loading |
 | I4 | 預設顯示的 commit 集合與現在相同（目前分支，預設 50 筆）；commit 時間沒有逆序時，順序也相同 | scope 預設 `current`；初始筆數沿用 50；切換 worktree 時筆數重設為 50 |
 | I5 | graph 失敗不可讓面板誤顯示「不是 Git 儲存庫」 | graph 不放進既有 `Promise.all`（`renderer/src/components/GitPanel.tsx:240-252`），自行處理失敗 |
@@ -88,7 +87,7 @@ GitPanel.loadData ─┬─ Promise.all(getLog, getStatus, getBranch, getRoot)  
 
 git_get_graph_log (Tauri) ─┬─ 遠端視窗：remote_invoke("git:graph-log")
                            └─ 本機：git_get_graph_log_native
-                                 └─ bat-git: build_graph_log_args → run_git_capture → parse_graph_log
+                                 └─ bat-git: build_graph_log_args → run_git → parse_graph_log
 
 computeGitGraph(rows) ──► 每列的節點、車道線 ──► GitGraphCell（SVG）+ ref 標籤
 ```
@@ -142,16 +141,16 @@ pub struct GitGraphLogEntry {
 
 ### 5.2 讀取 git 輸出
 
-既有 `run_git`（`src-tauri/crates/bat-git/src/git.rs:44-63`）先輪詢 `try_wait` 等程式結束，才讀 stdout。輸出超過 pipe 緩衝區（Windows 實測約在 38 KB 與 93 KB 之間）時，git 寫不出去、不會結束，最後逾時回 `None`。
+原本的 `run_git`（`src-tauri/crates/bat-git/src/git.rs:44-63`）先輪詢 `try_wait` 等程式結束，才讀 stdout。輸出超過 pipe 緩衝區（Windows 實測約在 38 KB 與 93 KB 之間）時，git 寫不出去、不會結束，最後逾時回 `None`。這會讓 Git 頁面所有使用它的指令在大輸出時失敗，例如超過約 64 KB 的 diff 顯示為空白。
 
-graph 指令改用新的 `run_git_capture`：
+依 D2，`run_git` 本身改為邊讀邊等，回傳約定不變（任何失敗都回 `None`）。Git 頁面與 GitHub 面板的 8 個指令（GitHub URL、branch、log、graph log、diff、變更檔案清單、root、status）都經由 `commands/git.rs` 的 `run_git_blocking` 使用它：
 
 - stdout 由另一個執行緒持續讀取，上限沿用 `MAX_OUTPUT_BYTES`（5 MiB）。
-- 主執行緒照舊輪詢 `try_wait` 做逾時判斷（5 秒）。
+- 主執行緒照舊輪詢 `try_wait` 做逾時判斷。
 - 逾時：kill 直接子行程後**立即回傳 `None`，不 join 讀取執行緒**。在 Windows 上，wrapper 啟動的真正 git 會繼續跑完並持有 pipe，join 會讓呼叫端一直等下去。殘留的 git 在自己結束後釋放 pipe，讀取執行緒隨之結束。
 - 正常結束：join 讀取執行緒；exit code 非 0、讀取失敗或超過上限都回 `None`。
 
-既有 `run_git` 不改（D2）。
+修正後，超過門檻的 diff 會實際顯示出來；接近 5 MiB 上限的 diff 可能讓 diff 畫面變慢。worktree 功能另有一個私有的同名函式（`src-tauri/crates/bat-git/src/worktree.rs:194`），寫法相同，不在 D2 範圍內，未修改。
 
 ### 5.3 IPC 與遠端
 
@@ -226,7 +225,8 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | 筆數重設 | 切換 worktree（`activePath` 改變）時重設為 50；重新整理與範圍切換保留目前筆數 |
 | ref 標籤 | 顯示在 message 前；目前分支粗體；顏色取該列節點顏色；排序依序為 detached HEAD、目前分支、本地分支、遠端分支、tag、其他；最多顯示 3 個，其餘以 `+N` 表示，滑鼠停留在 `+N` 上時列出其餘的標籤 |
 | 未提交變更 | 沿用現有列與點擊行為；graph 模式以空心橘色節點取代文字前的 `●`，虛線連到 HEAD commit；fallback 模式保留 `●` |
-| Fallback 模式 | 與現在完全相同：無 graph、無範圍切換、無載入更多 |
+| graph 開關 | 標題列的分支圖示按鈕，開啟時以強調色顯示；存在 `localStorage` 的 `better-terminal-git-graph-enabled`，預設開啟。關閉時：清除 graph 與進行中的 graph 請求、回到原本的清單樣式，之後的載入**不再取 graph**；選取的 commit 不在原清單中才清除。重新開啟時清除該 path 的失敗紀錄並重新取得。開關在 graph 可用、使用者已關閉、或切換進行中時顯示；graph 開啟但取不到時隱藏，以符合 I2 |
+| Fallback 模式 | 與現在完全相同：無 graph、無範圍切換、無載入更多、無 graph 開關 |
 
 新增 i18n key（四個語系）：`git.scopeCurrent`、`git.scopeAll`、`git.scopeToggleTitle`、`git.loadMore`。
 
@@ -234,7 +234,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 
 | 項目 | 成本 |
 |---|---|
-| git 執行 | 每次開啟或重新整理多一個 git 行程（graph），與既有 log 並行；耗時與現有 log 同等級（第 3 節）；沒有輪詢 |
+| git 執行 | graph 開啟時，每次開啟或重新整理多一個 git 行程（graph），與既有 log 並行；耗時與現有 log 同等級（第 3 節）；graph 關閉時沒有額外行程；沒有輪詢 |
 | 傳輸 | 500 筆約 93 KB；遠端回應上限 4 MiB |
 | 車道計算 | 500 筆 × 最多數條車道，毫秒等級，只在資料變動時算一次 |
 | 繪製 | 每列一個小 SVG（通常 1–8 條線）；500 列約數千個 SVG 元素，WebView 可輕鬆處理 |
@@ -245,7 +245,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 
 | 層 | 內容 |
 |---|---|
-| Rust 單元測試（bat-git） | `parse_graph_log`：多 parent、root、ref 分類（`HEAD ->`、detached HEAD、tag、遠端、`origin/HEAD`、其他、`grafted` 略過）、訊息含分隔字元、略過 gpg 等非紀錄行；`build_graph_log_args`：兩種 scope、筆數上限、`--ignore-missing` 在 `HEAD` 之前、`--` 在最後；`run_git_capture`：臨時 repo 中一個訊息超過 100 KB 的 commit，以單一 git 行程讀出完整輸出 |
+| Rust 單元測試（bat-git） | `parse_graph_log`：多 parent、root、ref 分類（`HEAD ->`、detached HEAD、tag、遠端、`origin/HEAD`、其他、`grafted` 略過）、訊息含分隔字元、略過 gpg 等非紀錄行；`build_graph_log_args`：兩種 scope、筆數上限、`--ignore-missing` 在 `HEAD` 之前、`--` 在最後；`run_git`：臨時 repo 中讀出超過 100 KB 的 commit 訊息與超過 100 KB 的 diff（修正前的實作會逾時失敗，已實測） |
 | Rust 單元測試（remote） | `legacy_v1_args_to_params("git:graph-log", [cwd, count, scope])` 產生正確的具名參數 |
 | Renderer 單元測試 | `tests/git-graph.test.ts` 以合成資料測：線性歷史、分支與合併、多分支頭、多分支平行匯合、octopus merge、merge 的第二個 parent 已在 track 中、parent 未載入、root 與孤立 commit（寬度含其節點）、虛擬列（HEAD 在第一列、在中間、與實線同時 match、merge 以 HEAD 為第二個 parent、找不到 HEAD）、換欄壓縮、顏色延續；另測 ref 排序與標籤截斷。所有案例與 3,000 個固定種子的隨機歷史都檢查結構不變式：列與列之間每個欄位連續且樣式一致、有子 commit 才有入線、真實 commit 不使用虛擬色、欄位不超出寬度 |
 | 既有測試 | `tests/host-api.test.ts` 加入 `getGraphLog` 的 mock 與呼叫順序；其他既有測試全部維持通過 |
@@ -262,10 +262,12 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | 階段 | 內容 | 驗證 |
 |---|---|---|
 | P0 | 本規劃文件與審查紀錄 | 文件審查 |
-| P1 後端 | bat-git：型別、`build_graph_log_args`、`parse_graph_log`、`run_git_capture` 與測試；`commands/git.rs`：`git_get_graph_log`、native、`pub use`；`lib.rs` 註冊；遠端參數表與其測試、派送分支 | `check:tauri-rust`、headless check、bat-git、remote-protocol 與主 crate 測試 |
+| P1 後端 | bat-git：型別、`build_graph_log_args`、`parse_graph_log`、`run_git_capture` 與測試（P5 併入 `run_git`）；`commands/git.rs`：`git_get_graph_log`、native、`pub use`；`lib.rs` 註冊；遠端參數表與其測試、派送分支 | `check:tauri-rust`、headless check、bat-git、remote-protocol 與主 crate 測試 |
 | P2 資料與演算法 | `host.git.getGraphLog` 與 git 方法註解；`tests/host-api.test.ts`；`renderer/src/lib/git-graph.ts`；`tests/git-graph.test.ts`；`package.json` 新增 `test:git-graph` 並串進 `verify:tauri-pre-ci` | tsc、`test:git-graph`、host-api 測試 |
 | P3 UI | `GitGraph.tsx`（cell 與 ref 標籤）、`GitPanel.tsx` 整合（漸進載入、失敗處理、範圍切換、載入更多、未提交節點）、CSS、四語系 i18n | tsc、compile、視覺截圖 |
 | P4 收尾 | 全面驗證、獨立驗收、修正、更新本文件狀態 | 第 6 節全部項目 |
+| P5（D2） | `run_git` 改為邊讀邊等，`run_git_capture` 併入；大輸出測試改測 `run_git` 並加入大 diff | 修正前後各跑一次該測試；`cargo check`、headless check、workspace 測試 |
+| P6（D3） | graph 開關、設定值解析與測試、i18n | tsc、compile、`test:git-graph`、標題列截圖 |
 
 ## 8. 風險
 
@@ -278,16 +280,16 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | R5 | graph 模式下選取列的左側色條改用 box-shadow | 視覺相同、不位移；fallback 模式不受影響 |
 | R6 | 逾時時 Windows 上殘留真正的 git 行程 | 它會自己跑完並釋放 pipe；R1 的失敗紀錄讓它每個 path 每工作階段最多出現一次 |
 
-## 9. 待使用者決策
+## 9. 使用者決策
 
-以下項目不阻擋實作，先以暫定做法完成，等使用者決定：
+以下項目由使用者於 2026-11-11 決定：
 
-| # | 決策 | 暫定做法 |
+| # | 決策 | 結果 |
 |---|---|---|
-| D1 | 預設顯示範圍：目前分支，或全部分支（附圖的樣子） | 預設目前分支，以保持現有清單內容不變；兩種都可切換 |
-| D2 | 是否另外修正既有 `run_git` 大輸出卡死。這會影響超過約 64 KB 的 diff，那類 diff 目前會變成空白 | 本分支不改既有函式，只讓新指令使用 `run_git_capture` |
-| D3 | 是否需要完全關閉 graph 的開關 | 不做 |
-| D5 | 「全部分支」是否包含遠端分支與 tag（遠端分支很多的 repo 會比較雜） | 包含，與附圖一致 |
+| D1 | 預設顯示範圍：目前分支，或全部分支（附圖的樣子） | 目前分支（維持現有清單內容）；可切換並記住 |
+| D2 | 是否修正既有 `run_git` 大輸出卡死（超過約 64 KB 的 diff 會變成空白） | 修正，在本分支以獨立 commit 進行（5.2、P5） |
+| D3 | 是否需要完全關閉 graph 的開關 | 加入標題列開關，關閉時回到原本的清單樣式並記住選擇（5.6、P6） |
+| D5 | 「全部分支」是否包含遠端分支與 tag | 包含，與附圖一致 |
 
 已自行決定的實作參數：「載入更多」初始 50、每次 +100、最多 500；初次顯示等待 graph 的上限 300 ms（理由見 5.6）。
 
@@ -328,11 +330,11 @@ P4 由 fresh-context 驗收 agent（逐條驗收條件）與審查 agent（diff 
 
 ### 11.1 實作內容
 
-commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI），之後是 P4 的修正與本文件更新。
+commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關），之後是本文件的決策與結果更新。
 
 | 層 | 檔案 |
 |---|---|
-| Rust | `src-tauri/crates/bat-git/src/git.rs`（型別、`run_git_capture`、`build_graph_log_args`、`parse_graph_log` 與測試）、`src-tauri/src/commands/git.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/remote_server.rs`、`src-tauri/crates/bat-remote-protocol/src/remote_core.rs` |
+| Rust | `src-tauri/crates/bat-git/src/git.rs`（型別、`run_git`、`build_graph_log_args`、`parse_graph_log` 與測試）、`src-tauri/src/commands/git.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/remote_server.rs`、`src-tauri/crates/bat-remote-protocol/src/remote_core.rs` |
 | Renderer 邏輯 | `renderer/src/lib/git-graph.ts`、`renderer/src/lib/git-graph-source.ts`、`renderer/src/host-api.ts` |
 | Renderer UI | `renderer/src/components/GitGraph.tsx`、`renderer/src/components/GitPanel.tsx`、`renderer/src/styles/file-browser.css`、`renderer/src/locales/{en,ja,zh-CN,zh-TW}.json` |
 | 測試與腳本 | `tests/git-graph.test.ts`、`tests/host-api.test.ts`、`package.json`（`test:git-graph`，已串進 `verify:tauri-pre-ci`） |
@@ -343,9 +345,11 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 |---|---|
 | `pnpm exec tsc --noEmit --pretty false`、`pnpm run compile` | exit 0 |
 | `cargo check --workspace`；headless `bat-server` check | exit 0；本分支新增的程式碼沒有 warning |
-| `cargo test --workspace --lib`（Git Bash，長路徑 TEMP） | 744 個全部通過（主 crate 345 個），P4 修正後重跑 |
-| `test:git-graph`（含 3,000 個隨機歷史）、`test:host-api`、`test:host-direct-calls`、`test:renderer-logging`、`test:unified-diff`、`test:workspace-restore` | 全部 exit 0 |
+| `cargo test --workspace --lib`（Git Bash，長路徑 TEMP） | P4 修正後 744 個全部通過（主 crate 345 個）。P5 後為 743 個（併入後少一個重複測試）：一次與 `pnpm run compile` 同時執行時，`bat-agent-bridge` 有 3 個端對端測試因 sidecar 逾時失敗；該 crate 不依賴 `bat-git`，單獨重跑兩次都是 31 個全部通過 |
+| `run_git` 大輸出（P5） | 新測試讀出超過 100 KB 的 commit 訊息與 diff；修正前的實作兩次讀取都卡到 20 秒逾時而失敗，修正後通過 |
+| `test:git-graph`（含 3,000 個隨機歷史與設定值解析）、`test:host-api`、`test:host-direct-calls`、`test:renderer-logging`、`test:unified-diff`、`test:workspace-restore`、`test:session-history` | 全部 exit 0 |
 | 畫面 | 以元件與 CSS 靜態渲染本 repo 真實資料與合成多分支資料，用 Edge headless 截圖檢查：線條連續、換欄曲線、匯合、octopus、孤立 root、未提交虛線、標籤截斷與 `+N`、窄欄裁切、選取列不位移 |
+| graph 開關（P6） | 標題列三種狀態截圖：graph 開啟（範圍按鈕、強調色開關、重新整理）、使用者關閉（開關、重新整理）、fallback（只有重新整理） |
 | fallback 模式 | 驗收 agent 逐項比對：graph 不可用時，標題列與清單的結構、class、`●` 與文字都和 `a89b44e` 相同 |
 
 環境備註：主 crate 的 `supported_agents_native_reads_frontmatter` 與 `bat-agent-bridge` 的 `end_to_end_bundled_sdk_loads_through_bundled_node` 會讀使用者家目錄，在 PowerShell 環境可能失敗；這與本功能無關，在 Git Bash 下以同一份程式碼重跑會通過。
@@ -356,3 +360,4 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 - macOS WKWebView、Linux WebKitGTK 的呈現。
 - 在執行中的 app 內實際操作（使用者正在使用 BAT，app 為單一實例）。
 - 沒有 commit-graph 檔的超大 repo 的實際耗時。
+- 接近 5 MiB 上限的 diff 在 diff 畫面的繪製效能（P5 之後才會顯示出來）。
