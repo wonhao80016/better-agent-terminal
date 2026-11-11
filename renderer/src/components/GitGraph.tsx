@@ -62,6 +62,17 @@ export function GitGraphCell({ row, laneCount }: { row: GraphRowLayout; laneCoun
   )
 }
 
+export function GitGraphToggleIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="4.5" cy="3.5" r="1.5" />
+      <circle cx="4.5" cy="12.5" r="1.5" />
+      <circle cx="11.5" cy="6" r="1.5" />
+      <path d="M4.5 5v6M11.5 7.5c0 2.5-7 1.5-7 3.5" />
+    </svg>
+  )
+}
+
 function refClassName(ref: GitGraphRef): string {
   return `git-ref-badge git-ref-${ref.kind}${ref.current ? ' git-ref-current' : ''}`
 }

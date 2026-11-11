@@ -3,6 +3,8 @@ import {
   buildGraphRows,
   computeGitGraph,
   findHeadHash,
+  parseGraphEnabled,
+  parseGraphScope,
   sortGraphRefs,
   splitGraphRefs,
   UNCOMMITTED_ROW_HASH,
@@ -306,6 +308,17 @@ function randomHistory(random: () => number): GraphInputRow[] {
   const split = splitGraphRefs(refs, 3)
   assert.deepEqual(split.visible.map(r => r.name), ['HEAD', 'main', 'dev'])
   assert.deepEqual(split.hidden.map(r => r.name), ['origin/main', 'v1', 'v0', 'stash'])
+}
+
+// Stored presentation settings fall back to their defaults: scope "current", graph on.
+{
+  assert.equal(parseGraphScope('all'), 'all')
+  assert.equal(parseGraphScope('current'), 'current')
+  assert.equal(parseGraphScope(null), 'current')
+  assert.equal(parseGraphScope('bogus'), 'current')
+  assert.equal(parseGraphEnabled(null), true)
+  assert.equal(parseGraphEnabled('true'), true)
+  assert.equal(parseGraphEnabled('false'), false)
 }
 
 // Graph log source: falls back from "all" to "current", remembers failures,

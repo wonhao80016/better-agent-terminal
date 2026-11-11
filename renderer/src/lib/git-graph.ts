@@ -122,6 +122,14 @@ export function computeGitGraph(rows: readonly GraphInputRow[]): GraphLayout {
   return { rows: layout, laneCount }
 }
 
+export function parseGraphScope(value: unknown): GitGraphScope {
+  return value === 'all' ? 'all' : 'current'
+}
+
+export function parseGraphEnabled(value: unknown): boolean {
+  return value !== 'false'
+}
+
 /** HEAD from the decorations; with scope "current" the log starts at HEAD. */
 export function findHeadHash(commits: readonly GitGraphCommit[], scope: GitGraphScope): string | null {
   const decorated = commits.find(commit => commit.refs.some(ref => ref.kind === 'head' || ref.current))

@@ -567,6 +567,8 @@
     "scopeAll": "すべてのブランチ",
     "scopeToggleTitle": "現在のブランチとすべてのブランチを切り替え",
     "loadMore": "さらに読み込む",
+    "showGraph": "コミットグラフを表示",
+    "hideGraph": "コミットグラフを非表示",
     "justNow": "たった今",
     "minutesAgo": "{{count}} 分前",
     "hoursAgo": "{{count}} 時間前",

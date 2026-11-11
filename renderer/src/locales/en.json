@@ -586,6 +586,8 @@
     "scopeAll": "All branches",
     "scopeToggleTitle": "Switch between the current branch and all branches",
     "loadMore": "Load more",
+    "showGraph": "Show commit graph",
+    "hideGraph": "Hide commit graph",
     "justNow": "just now",
     "minutesAgo": "{{count}}m ago",
     "hoursAgo": "{{count}}h ago",

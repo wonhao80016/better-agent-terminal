@@ -558,6 +558,8 @@
     "scopeAll": "全部分支",
     "scopeToggleTitle": "在当前分支与全部分支之间切换",
     "loadMore": "加载更多",
+    "showGraph": "显示提交线图",
+    "hideGraph": "隐藏提交线图",
     "justNow": "刚才",
     "minutesAgo": "{{count}} 分钟前",
     "hoursAgo": "{{count}} 小时前",

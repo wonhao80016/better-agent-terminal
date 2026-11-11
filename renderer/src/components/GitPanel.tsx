@@ -3,10 +3,10 @@ import { Fragment, useState, useEffect, useCallback, useMemo, useRef, type CSSPr
 import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
 import { ResizeHandle } from './ResizeHandle'
-import { GitGraphCell, GitRefBadges, graphWidthStyle } from './GitGraph'
+import { GitGraphCell, GitGraphToggleIcon, GitRefBadges, graphWidthStyle } from './GitGraph'
 import { useResizablePaneWidth } from '../hooks/useResizablePaneWidth'
 import { buildInlineFileRows, changeBlockEnd, changeBlockStarts, parseUnifiedDiff, splitContentLines, type DiffRow } from '../utils/unified-diff'
-import { buildGraphRows, computeGitGraph, findHeadHash, type GitGraphScope } from '../lib/git-graph'
+import { buildGraphRows, computeGitGraph, findHeadHash, parseGraphEnabled, parseGraphScope, type GitGraphScope } from '../lib/git-graph'
 import { createGraphLogSource, type GraphLogResult } from '../lib/git-graph-source'
 
 interface GitCommit {
@@ -45,6 +45,7 @@ function isTextFile(name: string): boolean {
 }
 
 const GRAPH_SCOPE_STORAGE_KEY = 'better-terminal-git-graph-scope'
+const GRAPH_ENABLED_STORAGE_KEY = 'better-terminal-git-graph-enabled'
 const GRAPH_INITIAL_COUNT = 50
 const GRAPH_PAGE_SIZE = 100
 const GRAPH_MAX_COUNT = 500
@@ -61,7 +62,7 @@ const graphLogSource = createGraphLogSource(
 
 function readStoredGraphScope(): GitGraphScope {
   try {
-    return localStorage.getItem(GRAPH_SCOPE_STORAGE_KEY) === 'all' ? 'all' : 'current'
+    return parseGraphScope(localStorage.getItem(GRAPH_SCOPE_STORAGE_KEY))
   } catch {
     return 'current'
   }
@@ -72,6 +73,22 @@ function writeStoredGraphScope(scope: GitGraphScope): void {
     localStorage.setItem(GRAPH_SCOPE_STORAGE_KEY, scope)
   } catch {
     // The scope choice is presentation-only; losing it is harmless.
+  }
+}
+
+function readStoredGraphEnabled(): boolean {
+  try {
+    return parseGraphEnabled(localStorage.getItem(GRAPH_ENABLED_STORAGE_KEY))
+  } catch {
+    return true
+  }
+}
+
+function writeStoredGraphEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(GRAPH_ENABLED_STORAGE_KEY, String(enabled))
+  } catch {
+    // The graph toggle is presentation-only; losing it is harmless.
   }
 }
 
@@ -245,6 +262,8 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const [graphBusy, setGraphBusy] = useState(false)
   const [initialGraphScope] = useState(readStoredGraphScope)
   const graphScopeRef = useRef<GitGraphScope>(initialGraphScope)
+  const [graphEnabled, setGraphEnabled] = useState(readStoredGraphEnabled)
+  const graphEnabledRef = useRef(graphEnabled)
   const graphCountRef = useRef(GRAPH_INITIAL_COUNT)
   const graphPathRef = useRef<string | null>(null)
   // loadData owns the plain list; graph-only reloads must not discard its result.
@@ -282,19 +301,22 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     selectedCommitRef.current = selectedCommit
   }, [selectedCommit])
 
+  const clearSelectionMissingFrom = useCallback((listed: readonly { hash: string }[]) => {
+    const selected = selectedCommitRef.current
+    if (!selected || selected === 'working' || listed.some(commit => commit.hash === selected)) return
+    setSelectedCommit(null)
+    setChangedFiles([])
+    setSelectedFile(null)
+    setDiff('')
+    setFileDiff('')
+  }, [])
+
   const applyGraph = useCallback((result: GraphLogResult | null) => {
     setGraph(result)
     if (!result) return
     graphScopeRef.current = result.scope
-    const selected = selectedCommitRef.current
-    if (selected && selected !== 'working' && !result.commits.some(commit => commit.hash === selected)) {
-      setSelectedCommit(null)
-      setChangedFiles([])
-      setSelectedFile(null)
-      setDiff('')
-      setFileDiff('')
-    }
-  }, [])
+    clearSelectionMissingFrom(result.commits)
+  }, [clearSelectionMissingFrom])
 
   const loadData = useCallback(async () => {
     const loadId = ++loadRequestRef.current
@@ -311,7 +333,9 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     setSelectedFile(null)
     setDiff('')
     setFileDiff('')
-    const graphRequest = graphLogSource.load(activePath, graphScopeRef.current, graphCountRef.current)
+    const graphRequest = graphEnabledRef.current
+      ? graphLogSource.load(activePath, graphScopeRef.current, graphCountRef.current)
+      : Promise.resolve(null)
     try {
       const [logResult, statusResult, branch, root] = await Promise.all([
         host.git.getLog(activePath),
@@ -362,6 +386,22 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     loadData()
   }, [activePath, loadData])
 
+  const handleToggleGraph = useCallback(() => {
+    const enabled = !graphEnabledRef.current
+    graphEnabledRef.current = enabled
+    setGraphEnabled(enabled)
+    writeStoredGraphEnabled(enabled)
+    if (enabled) {
+      graphLogSource.forget(activePath)
+      reloadGraph(graphScopeRef.current, graphCountRef.current, { persistScope: false, extendOnly: false })
+      return
+    }
+    graphRequestRef.current++
+    setGraphBusy(false)
+    setGraph(null)
+    clearSelectionMissingFrom(commits)
+  }, [activePath, commits, reloadGraph, clearSelectionMissingFrom])
+
   const handleToggleScope = useCallback(() => {
     if (!graph) return
     const nextScope: GitGraphScope = graph.scope === 'all' ? 'current' : 'all'
@@ -381,6 +421,8 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     return computeGitGraph(buildGraphRows(graph.commits, { uncommitted: status.length > 0, headHash }))
   }, [graph, status.length])
   const graphRowOffset = status.length > 0 ? 1 : 0
+  // Hidden while the graph is on but unavailable, so that fallback matches the original panel.
+  const showGraphToggle = !graphEnabled || graph !== null || graphBusy
   const canLoadMoreCommits = graph !== null && graph.commits.length >= graphCount && graphCount < GRAPH_MAX_COUNT
 
   const handleSelectCommit = useCallback(async (hash: string) => {
@@ -493,16 +535,29 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
       <div className="git-commit-list" style={commitPane.style}>
         <div className="git-col-header">
           <span>{t('git.commits')}</span>
-          {graph ? (
+          {showGraphToggle ? (
             <span className="git-col-header-actions">
+              {graph && (
+                <button
+                  type="button"
+                  className="git-graph-scope-btn"
+                  onClick={handleToggleScope}
+                  disabled={graphBusy}
+                  title={t('git.scopeToggleTitle')}
+                >
+                  {graph.scope === 'all' ? t('git.scopeAll') : t('git.scopeCurrent')}
+                </button>
+              )}
               <button
                 type="button"
-                className="git-graph-scope-btn"
-                onClick={handleToggleScope}
+                className={`git-graph-toggle-btn${graphEnabled ? ' active' : ''}`}
+                onClick={handleToggleGraph}
                 disabled={graphBusy}
-                title={t('git.scopeToggleTitle')}
+                title={graphEnabled ? t('git.hideGraph') : t('git.showGraph')}
+                aria-label={graphEnabled ? t('git.hideGraph') : t('git.showGraph')}
+                aria-pressed={graphEnabled}
               >
-                {graph.scope === 'all' ? t('git.scopeAll') : t('git.scopeCurrent')}
+                <GitGraphToggleIcon />
               </button>
               <button className="git-refresh-btn" onClick={handleRefresh} title={t('git.refresh')}>↻</button>
             </span>

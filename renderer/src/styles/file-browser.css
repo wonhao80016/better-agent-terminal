@@ -495,6 +495,31 @@
   opacity: 0.6;
 }
 
+.git-graph-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.git-graph-toggle-btn.active {
+  color: var(--accent-color, #d97706);
+}
+
+.git-graph-toggle-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.git-graph-toggle-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .git-ref-badges {
   margin-right: 2px;
 }
