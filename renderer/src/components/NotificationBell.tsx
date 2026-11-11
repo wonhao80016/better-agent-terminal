@@ -217,7 +217,7 @@ export function NotificationBell() {
         style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}
       >
         <span style={{ fontSize: 14 }}>🔔</span>
-        <span>{t('notifications.title')}</span>
+        <span className="notification-bell-label">{t('notifications.title')}</span>
         <span
           className="shortcut-hint notification-shortcut-hint"
           style={{ marginRight: badge ? 18 : 0 }}
