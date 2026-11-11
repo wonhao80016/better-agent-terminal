@@ -726,12 +726,9 @@ mod tests {
         let repo_dir = repo.to_str().expect("utf-8 temp path");
         let message_path = repo.join("message.txt");
         let big_file = repo.join("big.txt");
-        let original: String = (0..8_000).map(|n| format!("line {n} original
-")).collect();
-        let changed: String = (0..8_000).map(|n| format!("line {n} changed
-")).collect();
-        std::fs::write(&message_path, "large output line
-".repeat(8_000)).expect("write message");
+        let original: String = (0..8_000).map(|n| format!("line {n} original\n")).collect();
+        let changed: String = (0..8_000).map(|n| format!("line {n} changed\n")).collect();
+        std::fs::write(&message_path, "large output line\n".repeat(8_000)).expect("write message");
         std::fs::write(&big_file, &original).expect("write file");
         let hooks_path = format!("core.hooksPath={}", repo.join("no-hooks").display());
         let message_file = message_path.to_str().expect("utf-8 message path");
