@@ -116,6 +116,7 @@
     "tauri:build": "pnpm run tauri:build:all-in-one",
     "tauri:build:all-in-one": "pnpm run prepare:tauri-bundle:all-in-one && node scripts/tauri-build-mode.mjs --mode all-in-one",
     "tauri:build:lightweight": "pnpm run prepare:tauri-bundle:lightweight && node scripts/tauri-build-mode.mjs --mode lightweight",
+    "tauri:build:release": "pnpm run prepare:tauri-bundle:all-in-one && node scripts/tauri-build-local-release.mjs",
     "tauri:build:debug:ci": "pnpm run tauri:build:debug:ci:all-in-one",
     "tauri:build:debug:ci:all-in-one": "pnpm run prepare:tauri-bundle:ci:all-in-one && node scripts/tauri-build-mode.mjs --mode all-in-one --debug",
     "tauri:build:debug:ci:lightweight": "pnpm run prepare:tauri-bundle:ci:lightweight && node scripts/tauri-build-mode.mjs --mode lightweight --debug",

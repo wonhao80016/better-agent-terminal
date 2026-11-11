@@ -232,6 +232,7 @@
 }
 
 .sidebar-footer {
+  container-type: inline-size;
   padding: 12px;
   border-top: 1px solid var(--border-color);
 }
