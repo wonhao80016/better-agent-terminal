@@ -16,7 +16,7 @@ use crate::commands::profile as profile_cmd;
 use crate::remote_client::RustRemoteClientState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
-use bat_git::git::{run_git, run_git_capture};
+use bat_git::git::run_git;
 pub use bat_git::git::{
     build_diff_args, build_diff_files_args, build_graph_log_args, clamp_log_count,
     parse_diff_files, parse_github_url, parse_graph_log, parse_log, parse_status, GitFileEntry,
@@ -217,13 +217,7 @@ pub(crate) async fn git_get_graph_log_native(
     scope: Option<String>,
 ) -> Option<Vec<GitGraphLogEntry>> {
     let args = build_graph_log_args(count, scope.as_deref());
-    let raw = crate::async_rt::spawn_blocking(move || {
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_git_capture(&cwd, &refs, Duration::from_secs(5))
-    })
-    .await
-    .ok()
-    .flatten()?;
+    let raw = run_git_blocking(cwd, args, Duration::from_secs(5)).await?;
     Some(parse_graph_log(&raw))
 }
 

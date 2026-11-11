@@ -44,57 +44,10 @@ pub struct GitGraphLogEntry {
     pub message: String,
 }
 
-// Run git with the given args in `cwd`, returning stdout as a UTF-8
-// string with a wall-clock timeout. Any failure (non-zero exit,
-// missing binary, timeout, oversized output) collapses to None so
-// callers can apply their own default.
+// Run git in `cwd` and return stdout as UTF-8. Any failure (non-zero exit, missing binary,
+// timeout, output over MAX_OUTPUT_BYTES) collapses to None so callers apply their own default.
+// stdout is drained on a reader thread so output beyond the pipe buffer cannot stall git.
 pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    if cwd.trim().is_empty() {
-        return None;
-    }
-    if !Path::new(cwd).is_dir() {
-        return None;
-    }
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    hide_console_window(&mut command);
-    let mut child = command.spawn().ok()?;
-
-    // Cheap timeout: poll try_wait every 25 ms.
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => return None,
-        }
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    if output.stdout.len() > MAX_OUTPUT_BYTES {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Same contract as `run_git`, but stdout is drained on a separate thread so
-/// output larger than the pipe buffer cannot stall git until the timeout.
-pub fn run_git_capture(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
     if cwd.trim().is_empty() || !Path::new(cwd).is_dir() {
         return None;
     }
@@ -749,18 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn run_git_capture_rejects_invalid_cwd() {
-        assert!(run_git_capture("", &["status"], Duration::from_secs(1)).is_none());
-        assert!(run_git_capture(
-            "C:/this/path/should/never/exist/abc123",
-            &["status"],
-            Duration::from_secs(1),
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn run_git_capture_reads_output_larger_than_the_pipe_buffer() {
+    fn run_git_reads_output_larger_than_the_pipe_buffer() {
         let git_available = Command::new("git")
             .arg("--version")
             .stdout(Stdio::null())
@@ -777,44 +719,54 @@ mod tests {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0);
         let repo = std::env::temp_dir().join(format!(
-            "bat-git-capture-{}-{nanos}",
+            "bat-git-large-output-{}-{nanos}",
             std::process::id()
         ));
         std::fs::create_dir_all(&repo).expect("create fixture repo");
-        let message_path = repo.join("message.txt");
-        std::fs::write(&message_path, "graph capture line\n".repeat(8_000)).expect("write message");
         let repo_dir = repo.to_str().expect("utf-8 temp path");
+        let message_path = repo.join("message.txt");
+        let big_file = repo.join("big.txt");
+        let original: String = (0..8_000).map(|n| format!("line {n} original
+")).collect();
+        let changed: String = (0..8_000).map(|n| format!("line {n} changed
+")).collect();
+        std::fs::write(&message_path, "large output line
+".repeat(8_000)).expect("write message");
+        std::fs::write(&big_file, &original).expect("write file");
         let hooks_path = format!("core.hooksPath={}", repo.join("no-hooks").display());
         let message_file = message_path.to_str().expect("utf-8 message path");
-        let timeout = Duration::from_secs(60);
+        let setup_timeout = Duration::from_secs(60);
+        // A stalled read only ends at this timeout, so it must stay well below
+        // the setup timeout yet far above a normal read.
+        let read_timeout = Duration::from_secs(20);
 
-        let init = run_git_capture(repo_dir, &["init", "-q"], timeout);
-        let commit = run_git_capture(
-            repo_dir,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                &hooks_path,
-                "commit",
-                "--allow-empty",
-                "-q",
-                "-F",
-                message_file,
-            ],
-            timeout,
-        );
-        let log = run_git_capture(repo_dir, &["log", "-n", "1", "--pretty=format:%B"], timeout);
+        let init = run_git(repo_dir, &["init", "-q"], setup_timeout);
+        let add = run_git(repo_dir, &["add", "big.txt"], setup_timeout);
+        let mut commit_args = vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            hooks_path.as_str(),
+        ];
+        commit_args.extend(["commit", "-q", "-F", message_file]);
+        let commit = run_git(repo_dir, &commit_args, setup_timeout);
+        std::fs::write(&big_file, &changed).expect("rewrite file");
+        let log = run_git(repo_dir, &["log", "-n", "1", "--pretty=format:%B"], read_timeout);
+        let diff = run_git(repo_dir, &["diff", "HEAD", "--", "big.txt"], read_timeout);
         let _ = std::fs::remove_dir_all(&repo);
 
         assert!(init.is_some(), "git init failed");
+        assert!(add.is_some(), "git add failed");
         assert!(commit.is_some(), "git commit failed");
-        let log = log.expect("large git output is captured");
-        assert!(log.len() > 100_000, "captured {} bytes", log.len());
-        assert!(log.starts_with("graph capture line"));
+        let log = log.expect("a large log is read in full");
+        assert!(log.len() > 100_000, "log captured {} bytes", log.len());
+        assert!(log.starts_with("large output line"));
+        let diff = diff.expect("a large diff is read in full");
+        assert!(diff.len() > 100_000, "diff captured {} bytes", diff.len());
+        assert!(diff.contains("+line 7999 changed"));
     }
 }
