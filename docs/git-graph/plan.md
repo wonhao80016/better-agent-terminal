@@ -2,7 +2,7 @@
 
 Git 頁面的 commit 清單加上分支線圖（git graph），呈現方式參考 VS Code Git Graph：每個 commit 是一個節點，分支、合併以彩色車道線連接，並在訊息前標示 branch 與 tag。
 
-- 狀態：P0–P7 已完成並通過驗證（第 11 節）；第 9 節 D1–D6 已由使用者確認（2026-11-11），D7 待決策。
+- 狀態：P0–P9 已完成並通過驗證（第 11 節）；第 9 節 D1–D7 已由使用者確認（2026-11-11）。
 - 基準：本文件的檔案行號以 commit `a89b44e`（`local-dev`）為準。
 - 實作分支：`feat/git-graph`。
 
@@ -229,6 +229,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | 未提交變更 | 沿用現有列與點擊行為；graph 模式以空心橘色節點取代文字前的 `●`，虛線連到 HEAD commit；fallback 模式保留 `●` |
 | graph 開關 | 標題列的分支圖示按鈕，開啟時以強調色顯示；存在 `localStorage` 的 `better-terminal-git-graph-enabled`，預設開啟。關閉時：清除 graph 與進行中的 graph 請求、回到原本的清單樣式，之後的載入**不再取 graph**；選取的 commit 不在原清單中才清除。重新開啟時清除該 path 的失敗紀錄並重新取得。開關在 graph 可用、使用者已關閉、或切換進行中時顯示；graph 開啟但取不到時隱藏，以符合 I2 |
 | Fallback 模式 | 與現在完全相同：無 graph、無範圍切換、無載入更多、無 graph 開關 |
+| 不是 Git repo 時 | 訊息下方加「重新整理」按鈕（沿用 `git.refresh`），與標題列的重新整理相同（P9） |
 
 新增 i18n key（四個語系）：`git.scopeCurrent`、`git.scopeAll`、`git.scopeToggleTitle`、`git.loadMore`、`git.showGraph`、`git.hideGraph`。
 
@@ -271,6 +272,8 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | P5（D2） | `run_git` 改為邊讀邊等，`run_git_capture` 併入；大輸出測試改測 `run_git` 並加入大 diff | 修正前後各跑一次該測試；`cargo check`、headless check、workspace 測試 |
 | P6（D3） | graph 開關、設定值解析與測試、i18n | tsc、compile、`test:git-graph`、標題列截圖 |
 | P7（D6） | `bat-host-support` 新增 `ProcessTree`（`process-tree` 功能，預設開啟）；5 個逾時會結束 git 的 runner 改用它 | Windows 行程樹測試（含 git shim）、修正前後的孤兒重現、workspace 測試、獨立驗收 |
+| P8（D7） | `bat-git` 新增 `head::lookup_head`，`git_get_branch_native` 先讀 repo 檔案，只有遇到不處理的情況才執行 git | 檔案結構單元測試、與 `git rev-parse` 逐狀態比對的實際 repo 測試、本機 4 個工作區比對 |
+| P9（D7） | 「Not a git repository」畫面加重新整理按鈕 | tsc、compile、畫面截圖 |
 
 ## 8. 風險
 
@@ -294,12 +297,7 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | D3 | 是否需要完全關閉 graph 的開關 | 加入標題列開關，關閉時回到原本的清單樣式並記住選擇（5.6、P6） |
 | D5 | 「全部分支」是否包含遠端分支與 tag | 包含，與附圖一致 |
 | D6 | 逾時只結束 wrapper、卡住的 git 永遠殘留：是否清除現有孤兒、修正、追查原因 | 三項都做：清除本機的孤兒；以 `ProcessTree`（Job Object）修正所有 git runner（P7）；原因見 11.4 |
-
-待決策：
-
-| # | 決策 | 現況 |
-|---|---|---|
-| D7 | 是否降低讀分支造成的行程數量。Claude／Codex agent 面板每 5 秒讀一次分支、沒有防重入，每次啟動 wrapper、conhost、git 三個行程（11.4） | 未處理。可選：直接讀 `.git/HEAD` 不開行程（效果最大，需處理 worktree、detached HEAD、reftable 退回 git）；拉長間隔並在上一次未完成時跳過；唯讀查詢直接呼叫真正的 git 略過 wrapper；逾時加大並加防重入 |
+| D7 | 讀分支造成的行程數量，以及它逾時讓 Git 頁面誤判「Not a git repository」（11.5） | 讀分支改為直接讀 repo 檔案、必要時才退回 git（P8）；「Not a git repository」畫面加重新整理按鈕（P9） |
 
 已自行決定的實作參數：「載入更多」初始 50、每次 +100、最多 500；初次顯示等待 graph 的上限 300 ms（理由見 5.6）。
 
@@ -340,11 +338,12 @@ P4 由 fresh-context 驗收 agent（逐條驗收條件）與審查 agent（diff 
 
 ### 11.1 實作內容
 
-commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`）、`65135e9`（P7 效能修正：改用 `NtResumeProcess`）、`775d68f`（文件），以及之後的驗收小修。
+commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃）、`9ac1cee`（P1 後端）、`3e83a1d`（P2 資料與演算法）、`2379d3e`（P3 UI）、`5ab31e9`／`1af942d`／`54f9282`（P4 修正與文件）、`f68418d`（P5，D2：`run_git` 大輸出）、`75fb78c`（P6，D3：graph 開關）、`ca2b828`／`04087d7`／`f546808`（決策紀錄與小修）、`25f8b31`（P7，D6：`ProcessTree`）、`65135e9`（P7 效能修正：改用 `NtResumeProcess`）、`775d68f`（文件）、`a11e5a6`（驗收小修）、`ede8885`（P8，D7：直接讀 HEAD）、`e3dbe07`（P9，D7：重新整理按鈕），之後是本文件的結果更新。
 
 | 層 | 檔案 |
 |---|---|
 | Rust | `src-tauri/crates/bat-git/src/git.rs`（型別、`run_git`、`build_graph_log_args`、`parse_graph_log` 與測試）、`src-tauri/src/commands/git.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/remote_server.rs`、`src-tauri/crates/bat-remote-protocol/src/remote_core.rs` |
+| Rust（P8） | `src-tauri/crates/bat-git/src/head.rs`（`lookup_head` 與測試）、`src-tauri/crates/bat-git/src/lib.rs`、`src-tauri/src/commands/git.rs`（`git_get_branch_native`） |
 | Rust（P7） | `src-tauri/crates/bat-host-support/src/subprocess.rs`（`ProcessTree` 與 Windows 測試）、`src-tauri/crates/bat-host-support/Cargo.toml`、`src-tauri/crates/bat-git/src/worktree.rs`、`src-tauri/crates/bat-git/Cargo.toml`、`src-tauri/crates/bat-session-index/src/git.rs`、`src-tauri/crates/bat-session-index/Cargo.toml`、`src-tauri/src/commands/claude.rs` |
 | Renderer 邏輯 | `renderer/src/lib/git-graph.ts`、`renderer/src/lib/git-graph-source.ts`、`renderer/src/host-api.ts` |
 | Renderer UI | `renderer/src/components/GitGraph.tsx`、`renderer/src/components/GitPanel.tsx`、`renderer/src/styles/file-browser.css`、`renderer/src/locales/{en,ja,zh-CN,zh-TW}.json` |
@@ -366,6 +365,10 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 | 孤兒重現（P7） | 透過 shim、逾時 1–400 ms 各呼叫 56 次（全部逾時）：舊寫法留下 4 個暫停的孤兒，`run_git` 留下 0 個。獨立驗收另做三組（逾時 1–400 ms 各 192 次、150–400 ms 各 104 次、0–400 ms 結束各 82 次）：舊寫法分別留下 5、22、9 個，`run_git` 都是 0 個。改用 `NtResumeProcess` 後再跑兩輪共 112 次，仍是 0 個 |
 | 啟動成本（P7） | 以 Toolhelp 恢復執行緒時，`ProcessTree` 啟動中位數 266 ms、一般 spawn 70 ms；改用 `NtResumeProcess` 後為 71.7 ms 對 67.6 ms |
 | `cargo test --workspace --lib`（P7 後） | 747 個全部通過（多出的 4 個是 `ProcessTree` 測試）；`Cargo.lock` 沒有變動 |
+| 直接讀 HEAD（P8） | 9 個 `head` 測試通過，其中實際 repo 測試在每個狀態（還沒有 commit、一般分支、子目錄、名稱含 `/`、packed-refs、linked worktree、detached HEAD）都與 `git rev-parse --abbrev-ref HEAD` 相同；分支與 tag 同名時退回 git，git 輸出 `heads/feat/x` |
+| 本機工作區比對（P8） | BAT 設定的 4 個工作區結果都與 git 相同：`moc_refactor` `main`、`driver` `fix/s4-resume-pending-capture`、`better-agent-terminal` `feat/git-graph`、`d:\claude` 不是 repo；每次 0.4–10 ms，git 為 0.9–1.1 秒 |
+| 重新整理按鈕（P9） | tsc、compile 與 renderer 測試通過；截圖確認訊息下方置中顯示按鈕 |
+| `cargo test --workspace --lib`（P8 後） | 756 個全部通過（多出的 9 個是 `head` 測試）；`Cargo.lock` 沒有變動 |
 
 環境備註：主 crate 的 `supported_agents_native_reads_frontmatter` 與 `bat-agent-bridge` 的 `end_to_end_bundled_sdk_loads_through_bundled_node` 會讀使用者家目錄，在 PowerShell 環境可能失敗；`bat-session-index` 有 3 個測試在 TEMP 為 8.3 短路徑時失敗（`a89b44e` 之前就如此）。這些都與本功能無關，在 Git Bash、長路徑 TEMP 下以同一份程式碼重跑會通過。測試 `ProcessTree` 的 git shim 情境要在系統 PATH（PowerShell）下執行，Git Bash 的 PATH 會直接找到真正的 git 而略過該測試。
 
@@ -386,3 +389,10 @@ commit 以 `feat/git-graph` 分支為準，依階段為：`dcfa7be`（P0 規劃�
 - 實驗室負載下，建立者在 `CreateProcessW` 返回前被結束時，子行程通常會由系統清掉（`0xC000010A`）；現場為何沒有被清掉，未查明。但 Job Object 的做法不依賴這個清理：模擬實驗 15/15 次都結束了子行程，不用 Job 的對照組 3/3 留下孤兒。
 - 家目錄位於網路磁碟（`Z:`）：global config 確實讀 `Z:` 上的檔案，但對啟動時間的影響在誤差範圍內（中位數差 15–60 ms），不是主因。
 - 呼叫頻率：Claude 與 Codex agent 面板每 5 秒讀一次分支（`renderer/src/components/ClaudeAgentPanel.tsx`、`CodexAgentPanel.tsx`），沒有防重入；實測每分鐘 12 次，每次啟動 wrapper、conhost、git 三個行程。這是 D7 的背景。
+
+### 11.5 D7：Git 頁面誤判「Not a git repository」（2026-11-11）
+
+- 現象：`moc_refactor` 工作區的 Git 頁面顯示「Not a git repository」，但該目錄是正常的 git repo（`.git` 存在，`git rev-parse --abbrev-ref HEAD` 成功回傳 `main`，沒有權限警告）。
+- 原因：Git 頁面以讀分支（`git_get_branch`，逾時 3 秒）是否成功判斷是不是 repo，而且開啟時同時啟動 log、status、讀分支、root 四個 git。在本機，即使 CPU 只有 11%，讀分支也要 1.8–2.0 秒；系統較忙時就會超過 3 秒而被誤判。該畫面原本沒有重新整理按鈕，只能切換分頁才會重新判斷。截圖當下的那次呼叫沒有紀錄，所以「是逾時」是排除其他原因後的推論。
+- 處理：讀分支改為直接讀 repo 檔案（P8），不再受行程啟動時間影響，agent 面板的輪詢也不再啟動行程；「Not a git repository」畫面加重新整理按鈕（P9）。
+- 行為差異：判斷分支不再需要 git，所以在 git 會拒絕的 repo（例如 `safe.directory` 的 dubious ownership）或沒有安裝 git 的電腦上，Git 頁面會顯示空的清單，而不是「Not a git repository」。
