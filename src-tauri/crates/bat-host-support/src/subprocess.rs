@@ -17,9 +17,9 @@ pub fn hide_console_window(command: &mut std::process::Command) {
 #[cfg(not(windows))]
 pub fn hide_console_window(_command: &mut std::process::Command) {}
 
-/// A child process whose descendants end with it. On Windows it starts suspended in a
-/// kill-on-close job object, so `kill` or dropping the tree also ends what it started (for
-/// example the real git behind the `git.exe` shim), including processes still suspended.
+/// A child process that ends together with what it started. On Windows it starts suspended in
+/// a kill-on-close job object, so `kill` or drop also ends its descendants (for example the real
+/// git behind the `git.exe` shim), even suspended ones; without a job only the child ends.
 pub struct ProcessTree {
     child: std::process::Child,
     #[cfg(all(windows, feature = "process-tree"))]
@@ -77,18 +77,20 @@ mod job {
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
-    };
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    use windows_sys::Win32::System::Threading::{
-        OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
-    };
+    use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+
+    // Undocumented ntdll export, stable since Windows XP. It resumes every thread of one
+    // process in a single call; finding the thread through a snapshot costs ~200 ms per spawn.
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtResumeProcess(process: HANDLE) -> i32;
+    }
 
     pub(super) struct Job(HANDLE);
 
@@ -126,8 +128,9 @@ mod job {
         }
     }
 
-    // The child starts suspended so nothing it runs, such as a shim's own child,
-    // can start before the job owns it. A child that cannot be resumed is killed.
+    // The child starts suspended so nothing it runs, such as a shim's own child, can start
+    // before the job owns it. A child that cannot be resumed is killed; if the job cannot
+    // be created or cannot take the child, it runs without one and only it is killed.
     pub(super) fn spawn_in_job(command: &mut Command) -> std::io::Result<ProcessTree> {
         let Some(job) = Job::kill_on_close() else {
             command.creation_flags(CREATE_NO_WINDOW);
@@ -135,9 +138,9 @@ mod job {
         };
         command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let mut child = command.spawn()?;
-        let assigned =
-            unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) } != 0;
-        if !resume_threads(child.id()) {
+        let process = child.as_raw_handle() as HANDLE;
+        let assigned = unsafe { AssignProcessToJobObject(job.0, process) } != 0;
+        if unsafe { NtResumeProcess(process) } < 0 {
             let _ = child.kill();
             let _ = child.wait();
             return Err(std::io::Error::other("failed to resume the suspended child process"));
@@ -146,29 +149,6 @@ mod job {
             child,
             job: assigned.then_some(job),
         })
-    }
-
-    fn resume_threads(pid: u32) -> bool {
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-        if snapshot == INVALID_HANDLE_VALUE {
-            return false;
-        }
-        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
-        let mut resumed = false;
-        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
-        while more {
-            if entry.th32OwnerProcessID == pid {
-                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-                if !thread.is_null() {
-                    resumed |= unsafe { ResumeThread(thread) } != u32::MAX;
-                    unsafe { CloseHandle(thread) };
-                }
-            }
-            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
-        }
-        unsafe { CloseHandle(snapshot) };
-        resumed
     }
 }
 
