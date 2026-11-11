@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,6 +23,31 @@ function newBundles(since) {
     .filter(entry => entry.isDirectory())
     .flatMap(entry => readdirSync(join(bundleDir, entry.name)).map(name => join(bundleDir, entry.name, name)))
     .filter(path => statSync(path).mtimeMs >= since)
+}
+
+// Windows refuses write access to a running executable, so EBUSY marks a live BAT in this target dir.
+function runningExecutables() {
+  if (process.platform !== 'win32') return []
+  const release = join(targetDir, 'release')
+  return [join(release, 'BetterAgentTerminal.exe'), join(release, 'node-runtime', 'windows-x86_64', 'node.exe')]
+    .filter((path) => {
+      if (!existsSync(path)) return false
+      try {
+        closeSync(openSync(path, 'r+'))
+        return false
+      } catch (err) {
+        return err.code === 'EBUSY'
+      }
+    })
+}
+
+const running = runningExecutables()
+if (running.length > 0) {
+  console.error('[tauri-build-local-release] these files are in use and the build would fail to overwrite them:')
+  for (const path of running) console.error(`  ${path}`)
+  console.error('Close the BetterAgentTerminal started from this folder (or run the installed copy instead),')
+  console.error('or set CARGO_TARGET_DIR to another directory.')
+  process.exit(1)
 }
 
 const startedAt = Date.now()
