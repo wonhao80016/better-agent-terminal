@@ -139,7 +139,7 @@ pub(crate) async fn git_get_branch_native(cwd: String) -> Option<String> {
     let lookup_cwd = cwd.clone();
     let lookup = crate::async_rt::spawn_blocking(move || lookup_head(Path::new(&lookup_cwd)))
         .await
-        .ok()?;
+        .unwrap_or(HeadLookup::AskGit);
     match lookup {
         HeadLookup::Name(name) => return Some(name),
         HeadLookup::Missing => return None,

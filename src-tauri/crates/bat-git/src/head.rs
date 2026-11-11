@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The outcome of resolving `git rev-parse --abbrev-ref HEAD` from the repository files.
 #[derive(Debug, PartialEq, Eq)]
@@ -12,7 +12,7 @@ pub enum HeadLookup {
     Name(String),
     /// git fails too: no repository, or HEAD names a branch that has no commits yet.
     Missing,
-    /// A layout this reader does not handle; run git instead.
+    /// Anything this reader cannot answer with certainty; run git instead.
     AskGit,
 }
 
@@ -36,10 +36,21 @@ pub fn lookup_head(cwd: &Path) -> HeadLookup {
 
 // `ceiling` stops discovery before it is examined, so tests stay inside a fixture.
 fn lookup_head_below(cwd: &Path, ceiling: Option<&Path>) -> HeadLookup {
+    // git resolves its working directory to the real path (junctions, symlinks, `..`).
+    let cwd = match fs::canonicalize(cwd) {
+        Ok(real) => real,
+        Err(error) if error.kind() == ErrorKind::NotFound => return HeadLookup::Missing,
+        Err(_) => return HeadLookup::AskGit,
+    };
     if !cwd.is_dir() {
         return HeadLookup::Missing;
     }
-    match discover_git_dir(cwd, ceiling) {
+    // A "HEAD" entry makes git read the argument as a path or reject it as ambiguous.
+    if fs::symlink_metadata(cwd.join("HEAD")).is_ok() {
+        return HeadLookup::AskGit;
+    }
+    let ceiling = ceiling.and_then(|path| fs::canonicalize(path).ok());
+    match discover_git_dir(&cwd, ceiling.as_deref()) {
         Discovery::Found(git_dir) => read_head(&git_dir),
         Discovery::NotFound => HeadLookup::Missing,
         Discovery::Unsure => HeadLookup::AskGit,
@@ -52,8 +63,8 @@ enum Discovery {
     Unsure,
 }
 
-// Mirrors git's discovery: at each level a `.git` directory or `gitdir:` file, then the
-// directory itself as a git dir (bare repositories, or a cwd inside `.git`).
+// Follows git's discovery: at each level a `.git` directory or `gitdir:` file, then the
+// directory itself as a git dir. Bare repositories are left to git (safe.bareRepository).
 fn discover_git_dir(cwd: &Path, ceiling: Option<&Path>) -> Discovery {
     #[cfg(unix)]
     let start_device = device_of(cwd);
@@ -80,7 +91,11 @@ fn discover_git_dir(cwd: &Path, ceiling: Option<&Path>) -> Discovery {
             }
         }
         if is_git_dir(dir) {
-            return Discovery::Found(dir.to_path_buf());
+            return if dir.file_name().is_some_and(|name| name == ".git") {
+                Discovery::Found(dir.to_path_buf())
+            } else {
+                Discovery::Unsure
+            };
         }
     }
     Discovery::NotFound
@@ -92,10 +107,11 @@ fn device_of(path: &Path) -> Option<u64> {
     fs::metadata(path).ok().map(|metadata| metadata.dev())
 }
 
+// git accepts only "gitdir: <path>"; anything else is an invalid gitfile to git.
 fn read_gitdir_file(dot_git: &Path, dir: &Path) -> Option<PathBuf> {
     let content = fs::read_to_string(dot_git).ok()?;
-    let target = content.trim().strip_prefix("gitdir:")?.trim();
-    (!target.is_empty()).then(|| dir.join(target))
+    let target = content.strip_prefix("gitdir: ")?.trim_end();
+    (!target.is_empty()).then(|| join_relative(dir, target))
 }
 
 fn is_git_dir(dir: &Path) -> bool {
@@ -109,13 +125,44 @@ fn is_git_dir(dir: &Path) -> bool {
 // A linked worktree's git dir names the shared repository in `commondir`.
 fn common_dir(git_dir: &Path) -> PathBuf {
     match fs::read_to_string(git_dir.join("commondir")) {
-        Ok(content) if !content.trim().is_empty() => git_dir.join(content.trim()),
+        Ok(content) if !content.trim().is_empty() => join_relative(git_dir, content.trim()),
         _ => git_dir.to_path_buf(),
     }
 }
 
+// Resolves `relative` lexically. Canonical Windows paths are verbatim (`\\?\`), where the
+// file system would take `..` and `/` literally instead of as navigation and separators.
+fn join_relative(base: &Path, relative: &str) -> PathBuf {
+    let relative_path = Path::new(relative);
+    if relative_path.has_root() {
+        return relative_path.to_path_buf();
+    }
+    let mut joined = base.to_path_buf();
+    for component in relative_path.components() {
+        match component {
+            Component::ParentDir => {
+                joined.pop();
+            }
+            Component::Normal(part) => joined.push(part),
+            _ => {}
+        }
+    }
+    joined
+}
+
+fn ref_path(base: &Path, refname: &str) -> PathBuf {
+    let mut path = base.to_path_buf();
+    for segment in refname.split('/') {
+        path.push(segment);
+    }
+    path
+}
+
 fn read_head(git_dir: &Path) -> HeadLookup {
     let common = common_dir(git_dir);
+    let Some(object_id_len) = object_id_len(&common) else {
+        return HeadLookup::AskGit;
+    };
     if common.join("reftable").is_dir() {
         return HeadLookup::AskGit;
     }
@@ -131,7 +178,7 @@ fn read_head(git_dir: &Path) -> HeadLookup {
     };
     let head = head.trim();
     let Some(target) = head.strip_prefix("ref:").map(str::trim) else {
-        return if is_object_id(head) {
+        return if is_object_id(head, object_id_len) {
             HeadLookup::Name("HEAD".into())
         } else {
             HeadLookup::AskGit
@@ -143,12 +190,20 @@ fn read_head(git_dir: &Path) -> HeadLookup {
     let Some(packed) = read_packed_ref_names(&common) else {
         return HeadLookup::AskGit;
     };
-    let exists = |refname: &str| common.join(refname).is_file() || packed.contains(refname);
-    if !exists(target) {
+    let loose = ref_path(&common, target);
+    if loose.is_file() {
+        // A symbolic, empty or corrupt loose ref makes git resolve elsewhere or fail.
+        let valid = fs::read_to_string(&loose)
+            .is_ok_and(|content| is_object_id(content.trim(), object_id_len));
+        if !valid {
+            return HeadLookup::AskGit;
+        }
+    } else if !packed.contains(target) {
         return HeadLookup::Missing;
     }
+    let exists = |refname: &str| ref_path(&common, refname).exists() || packed.contains(refname);
     // `--abbrev-ref` prints "heads/<name>" when <name> also resolves another way; let git decide.
-    let ambiguous = git_dir.join(name).is_file()
+    let ambiguous = ref_path(git_dir, name).exists()
         || [
             format!("refs/{name}"),
             format!("refs/tags/{name}"),
@@ -161,6 +216,51 @@ fn read_head(git_dir: &Path) -> HeadLookup {
         return HeadLookup::AskGit;
     }
     HeadLookup::Name(name.to_string())
+}
+
+// Object id length from the repository config. Unknown versions or extensions (including
+// ref storage) make git behave differently or refuse the repository, so they return None.
+fn object_id_len(common: &Path) -> Option<usize> {
+    let config = match fs::read_to_string(common.join("config")) {
+        Ok(config) => config,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Some(40),
+        Err(_) => return None,
+    };
+    let mut section = String::new();
+    let mut version = 0u32;
+    let mut object_format = String::from("sha1");
+    for line in config.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[') {
+            section = header
+                .split(|c: char| c == ']' || c.is_whitespace())
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((key, value)) => (key.trim().to_ascii_lowercase(), value.trim().to_ascii_lowercase()),
+            None => (line.to_ascii_lowercase(), String::from("true")),
+        };
+        match (section.as_str(), key.as_str()) {
+            ("core", "repositoryformatversion") => version = value.parse().ok()?,
+            ("extensions", "objectformat") => object_format = value,
+            ("extensions", "worktreeconfig" | "partialclone" | "preciousobjects" | "noop") => {}
+            ("extensions", _) => return None,
+            _ => {}
+        }
+    }
+    if version > 1 {
+        return None;
+    }
+    match object_format.as_str() {
+        "sha1" => Some(40),
+        "sha256" => Some(64),
+        _ => None,
+    }
 }
 
 fn read_packed_ref_names(common: &Path) -> Option<HashSet<String>> {
@@ -177,8 +277,8 @@ fn read_packed_ref_names(common: &Path) -> Option<HashSet<String>> {
     }
 }
 
-fn is_object_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+fn is_object_id(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -237,11 +337,18 @@ mod tests {
         HeadLookup::Name(value.into())
     }
 
+    fn repo_on_main(label: &str) -> Fixture {
+        let fixture = Fixture::new(label);
+        fixture.git_dir("repo/.git", "ref: refs/heads/main\n");
+        fixture.write("repo/.git/refs/heads/main", &format!("{HASH}\n"));
+        fixture
+    }
+
     #[test]
     fn reads_a_branch_with_a_loose_ref_from_any_subdirectory() {
         let fixture = Fixture::new("loose");
         fixture.git_dir("repo/.git", "ref: refs/heads/feat/git-graph\n");
-        fixture.write("repo/.git/refs/heads/feat/git-graph", HASH);
+        fixture.write("repo/.git/refs/heads/feat/git-graph", &format!("{HASH}\n"));
         assert_eq!(fixture.lookup("repo"), name("feat/git-graph"));
         assert_eq!(fixture.lookup("repo/src/deep"), name("feat/git-graph"));
     }
@@ -265,12 +372,21 @@ mod tests {
     }
 
     #[test]
-    fn a_detached_head_reads_as_head() {
-        let fixture = Fixture::new("detached");
-        fixture.git_dir("repo/.git", &format!("{HASH}\n"));
-        assert_eq!(fixture.lookup("repo"), name("HEAD"));
+    fn a_detached_head_matches_the_repository_hash_length() {
+        let sha1 = Fixture::new("detached");
+        sha1.git_dir("repo/.git", &format!("{HASH}\n"));
+        assert_eq!(sha1.lookup("repo"), name("HEAD"));
+
+        let wrong_len = Fixture::new("detached-long");
+        wrong_len.git_dir("repo/.git", &"a".repeat(64));
+        assert_eq!(wrong_len.lookup("repo"), HeadLookup::AskGit);
+
         let sha256 = Fixture::new("detached256");
         sha256.git_dir("repo/.git", &"a".repeat(64));
+        sha256.write(
+            "repo/.git/config",
+            "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n",
+        );
         assert_eq!(sha256.lookup("repo"), name("HEAD"));
     }
 
@@ -287,36 +403,94 @@ mod tests {
     }
 
     #[test]
-    fn reads_bare_repositories_and_a_cwd_inside_dot_git() {
-        let fixture = Fixture::new("bare");
-        fixture.git_dir("bare.git", "ref: refs/heads/main\n");
-        fixture.write("bare.git/refs/heads/main", HASH);
-        assert_eq!(fixture.lookup("bare.git"), name("main"));
+    fn a_cwd_inside_dot_git_reads_its_repository() {
+        let fixture = Fixture::new("inside");
         fixture.git_dir("repo/.git", "ref: refs/heads/dev\n");
         fixture.write("repo/.git/refs/heads/dev", HASH);
         assert_eq!(fixture.lookup("repo/.git/refs"), name("dev"));
     }
 
     #[test]
-    fn leaves_ambiguous_names_and_unusual_layouts_to_git() {
-        let tag = Fixture::new("ambiguous");
-        tag.git_dir("repo/.git", "ref: refs/heads/v1\n");
-        tag.write("repo/.git/refs/heads/v1", HASH);
-        tag.write("repo/.git/packed-refs", &format!("{HASH} refs/tags/v1\n"));
-        assert_eq!(tag.lookup("repo"), HeadLookup::AskGit);
+    fn resolves_paths_with_parent_components_to_the_real_directory() {
+        let fixture = repo_on_main("dotdot");
+        fs::create_dir_all(fixture.root.join("repo/a")).expect("a");
+        fs::create_dir_all(fixture.root.join("outside")).expect("outside");
+        assert_eq!(fixture.lookup("repo/a/../a"), name("main"));
+        assert_eq!(fixture.lookup("repo/../outside"), HeadLookup::Missing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn follows_a_junction_to_the_repository_it_points_into() {
+        let fixture = repo_on_main("junction");
+        fixture.git_dir("other/.git", "ref: refs/heads/topic\n");
+        fixture.write("other/.git/refs/heads/topic", HASH);
+        let target = fixture.root.join("repo").join("src");
+        fs::create_dir_all(&target).expect("src");
+        let link = fixture.root.join("other").join("link");
+        let made = Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("skipping: could not create a junction");
+            return;
+        }
+        assert_eq!(fixture.lookup("other/link"), name("main"));
+        let _ = fs::remove_dir(&link);
+    }
+
+    #[test]
+    fn leaves_uncertain_layouts_to_git() {
+        let tag = repo_on_main("ambiguous");
+        tag.write("repo/.git/packed-refs", &format!("{HASH} refs/tags/main\n"));
+        assert_eq!(tag.lookup("repo"), HeadLookup::AskGit, "branch shadowed by a tag");
+
+        let head_entry = repo_on_main("headentry");
+        head_entry.write("repo/HEAD", "");
+        assert_eq!(head_entry.lookup("repo"), HeadLookup::AskGit, "HEAD file in cwd");
+
+        let symbolic = repo_on_main("symref");
+        symbolic.write("repo/.git/refs/heads/main", "ref: refs/heads/other\n");
+        assert_eq!(symbolic.lookup("repo"), HeadLookup::AskGit, "symbolic branch ref");
+
+        let empty = repo_on_main("emptyref");
+        empty.write("repo/.git/refs/heads/main", "");
+        assert_eq!(empty.lookup("repo"), HeadLookup::AskGit, "empty loose ref");
 
         let reftable = Fixture::new("reftable");
         reftable.git_dir("repo/.git", "ref: refs/heads/.invalid\n");
         fs::create_dir_all(reftable.root.join("repo/.git/reftable")).expect("reftable");
-        assert_eq!(reftable.lookup("repo"), HeadLookup::AskGit);
+        assert_eq!(reftable.lookup("repo"), HeadLookup::AskGit, "reftable");
+
+        let extension = repo_on_main("extension");
+        extension.write(
+            "repo/.git/config",
+            "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tunknownext = true\n",
+        );
+        assert_eq!(extension.lookup("repo"), HeadLookup::AskGit, "unknown extension");
 
         let other = Fixture::new("otherref");
         other.git_dir("repo/.git", "ref: refs/remotes/origin/main\n");
-        assert_eq!(other.lookup("repo"), HeadLookup::AskGit);
+        assert_eq!(other.lookup("repo"), HeadLookup::AskGit, "HEAD outside refs/heads");
 
         let broken = Fixture::new("brokenlink");
         broken.write("repo/.git", "gitdir: ../missing\n");
-        assert_eq!(broken.lookup("repo"), HeadLookup::AskGit);
+        assert_eq!(broken.lookup("repo"), HeadLookup::AskGit, "gitdir to nowhere");
+
+        let nospace = repo_on_main("nospace");
+        nospace.write("wt/.git", "gitdir:../repo/.git\n");
+        assert_eq!(nospace.lookup("wt"), HeadLookup::AskGit, "gitdir without a space");
+
+        let bare = Fixture::new("bare");
+        bare.git_dir("bare.git", "ref: refs/heads/main\n");
+        bare.write("bare.git/refs/heads/main", HASH);
+        assert_eq!(bare.lookup("bare.git/refs"), HeadLookup::AskGit, "bare repository");
     }
 
     #[test]
@@ -399,5 +573,14 @@ mod tests {
         assert!(git(&repo, &["tag", "feat/x"]).is_some());
         assert_eq!(lookup(&repo), HeadLookup::AskGit, "branch name shadowed by a tag");
         assert_eq!(rev_parse(&repo).as_deref(), Some("heads/feat/x"));
+        fs::write(repo.join("HEAD"), "").expect("write HEAD file");
+        assert_eq!(lookup(&repo), HeadLookup::AskGit, "HEAD file in the working tree");
+
+        let unborn = fixture.root.join("unborn");
+        fs::create_dir_all(&unborn).expect("create unborn repo");
+        assert!(git(&unborn, &["init", "-q"]).is_some(), "git init unborn");
+        fs::write(unborn.join("HEAD"), "").expect("write HEAD file");
+        assert_eq!(lookup(&unborn), HeadLookup::AskGit, "unborn branch with a HEAD file");
+        assert_eq!(rev_parse(&unborn).as_deref(), Some("HEAD"), "git reads HEAD as a path");
     }
 }
