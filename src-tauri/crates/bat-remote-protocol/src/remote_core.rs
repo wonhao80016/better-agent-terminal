@@ -516,7 +516,9 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "git:branch" | "git:status" | "git:getRoot" => Some(&["cwd"]),
         "git:log" => Some(&["cwd", "count"]),
         "git:graph-log" => Some(&["cwd", "count", "scope"]),
-        "git:diff" => Some(&["cwd", "commitHash", "filePath"]),
+        "git:diff" => Some(&["cwd", "commitHash", "filePath", "oldFilePath"]),
+        "git:show-file" => Some(&["cwd", "rev", "filePath"]),
+        "git:commit-details" => Some(&["cwd", "commitHash"]),
         "git:diff-files" => Some(&["cwd", "commitHash"]),
         "fs:readdir" | "fs:isDirectory" | "fs:search" | "fs:watch" | "fs:unwatch"
         | "fs:list-dirs" => match channel {
@@ -966,6 +968,32 @@ mod tests {
                 &[json!("/repo"), Value::Null, Value::Null]
             ),
             json!({ "cwd": "/repo", "count": null, "scope": null })
+        );
+    }
+
+    #[test]
+    fn git_file_channels_map_positional_args() {
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "git:diff",
+                &[json!("/repo"), json!("abc"), json!("b.rs"), json!("a.rs")]
+            ),
+            json!({ "cwd": "/repo", "commitHash": "abc", "filePath": "b.rs", "oldFilePath": "a.rs" })
+        );
+        let from_older_client =
+            legacy_v1_args_to_params("git:diff", &[json!("/repo"), json!("abc"), json!("b.rs")]);
+        assert_eq!(from_older_client["filePath"], json!("b.rs"));
+        assert!(from_older_client.get("oldFilePath").map_or(true, Value::is_null));
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "git:show-file",
+                &[json!("/repo"), json!("abc~1"), json!("src/a.rs")]
+            ),
+            json!({ "cwd": "/repo", "rev": "abc~1", "filePath": "src/a.rs" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("git:commit-details", &[json!("/repo"), json!("abc123")]),
+            json!({ "cwd": "/repo", "commitHash": "abc123" })
         );
     }
 

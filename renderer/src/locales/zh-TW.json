@@ -565,6 +565,13 @@
 
   "git": {
     "commits": "提交紀錄",
+    "detailsCommit": "提交",
+    "detailsParents": "父提交",
+    "detailsAuthor": "作者",
+    "detailsCommitter": "提交者",
+    "detailsDate": "日期",
+    "detailsUnavailable": "無法取得提交詳細資料。",
+    "parentNotLoaded": "{{hash}} 不在目前載入的清單中",
     "refresh": "重新整理",
     "uncommittedChanges": "未提交的變更",
     "filesChanged": "{{count}} 個檔案已變更",

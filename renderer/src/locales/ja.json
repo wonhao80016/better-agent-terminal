@@ -549,6 +549,13 @@
   },
   "git": {
     "commits": "コミット",
+    "detailsCommit": "コミット",
+    "detailsParents": "親コミット",
+    "detailsAuthor": "作成者",
+    "detailsCommitter": "コミッター",
+    "detailsDate": "日時",
+    "detailsUnavailable": "コミットの詳細を取得できません。",
+    "parentNotLoaded": "{{hash}} は読み込まれた一覧にありません",
     "refresh": "更新",
     "uncommittedChanges": "未コミットの変更",
     "filesChanged": "{{count}} 件のファイルを変更",

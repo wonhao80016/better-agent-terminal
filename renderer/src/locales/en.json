@@ -568,6 +568,13 @@
 
   "git": {
     "commits": "Commits",
+    "detailsCommit": "Commit",
+    "detailsParents": "Parents",
+    "detailsAuthor": "Author",
+    "detailsCommitter": "Committer",
+    "detailsDate": "Date",
+    "detailsUnavailable": "Commit details are unavailable.",
+    "parentNotLoaded": "{{hash}} is not in the loaded list",
     "refresh": "Refresh",
     "uncommittedChanges": "Uncommitted Changes",
     "filesChanged": "{{count}} file changed",

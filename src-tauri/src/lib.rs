@@ -340,6 +340,8 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             git_cmd::git_get_log,
             git_cmd::git_get_graph_log,
             git_cmd::git_get_diff,
+            git_cmd::git_show_file,
+            git_cmd::git_get_commit_details,
             git_cmd::git_get_diff_files,
             git_cmd::git_get_root,
             git_cmd::git_get_status,

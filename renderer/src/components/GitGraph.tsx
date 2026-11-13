@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react'
 import {
   GRAPH_COLOR_COUNT,
   VIRTUAL_COLOR,
+  graphContinuations,
   splitGraphRefs,
   type GitGraphRef,
   type GraphLine,
@@ -58,6 +59,27 @@ export function GitGraphCell({ row, laneCount }: { row: GraphRowLayout; laneCoun
         className={`git-graph-node${row.virtual ? ' git-graph-node-uncommitted' : ''}`}
         style={{ left: laneX(row.lane) - 4, '--git-graph-node-color': laneColor(row.color) } as CSSProperties}
       />
+    </span>
+  )
+}
+
+export function GitGraphContinuation({ row, laneCount }: { row: GraphRowLayout; laneCount: number }) {
+  const width = Math.max(1, laneCount) * LANE_WIDTH
+  return (
+    <span className="git-graph-cell" aria-hidden="true">
+      <svg className="git-graph-svg" width={width} viewBox={`0 0 ${width} ${ROW_BOTTOM}`} preserveAspectRatio="none">
+        {graphContinuations(row).map(lane => (
+          <path
+            key={lane.lane}
+            d={`M${laneX(lane.lane)} 0V${ROW_BOTTOM}`}
+            fill="none"
+            strokeWidth={2}
+            strokeDasharray={lane.dashed ? '3 3' : undefined}
+            vectorEffect="non-scaling-stroke"
+            style={{ stroke: laneColor(lane.color) }}
+          />
+        ))}
+      </svg>
     </span>
   )
 }

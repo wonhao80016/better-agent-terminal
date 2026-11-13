@@ -21,6 +21,23 @@ pub struct GitLogEntry {
 pub struct GitFileEntry {
     pub status: String,
     pub file: String,
+    /// Source path of a rename or copy; `file` is the destination.
+    #[serde(rename = "oldFile", default, skip_serializing_if = "Option::is_none")]
+    pub old_file: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitDetails {
+    pub hash: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub committer_date: String,
+    pub message: String,
 }
 
 /// A ref decorating a graph log commit. `kind` is one of "head" (detached
@@ -46,8 +63,19 @@ pub struct GitGraphLogEntry {
 
 // Run git in `cwd` and return stdout as UTF-8. Any failure (non-zero exit, missing binary,
 // timeout, output over MAX_OUTPUT_BYTES) collapses to None so callers apply their own default.
-// stdout is drained on a reader thread so output beyond the pipe buffer cannot stall git.
 pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let stdout = run_git_bytes(cwd, args, timeout, MAX_OUTPUT_BYTES)?;
+    Some(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+// Raw stdout of `git`, or None on any failure or when it exceeds `max_bytes`.
+// stdout is drained on a reader thread so output beyond the pipe buffer cannot stall git.
+pub fn run_git_bytes(
+    cwd: &str,
+    args: &[&str],
+    timeout: Duration,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
     if cwd.trim().is_empty() || !Path::new(cwd).is_dir() {
         return None;
     }
@@ -66,7 +94,7 @@ pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
         stdout
-            .take(MAX_OUTPUT_BYTES as u64 + 1)
+            .take(max_bytes as u64 + 1)
             .read_to_end(&mut buffer)
             .map(|_| buffer)
     });
@@ -90,10 +118,18 @@ pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
     };
 
     let stdout = reader.join().ok()?.ok()?;
-    if !status.success() || stdout.len() > MAX_OUTPUT_BYTES {
+    if !status.success() || stdout.len() > max_bytes {
         return None;
     }
-    Some(String::from_utf8_lossy(&stdout).into_owned())
+    Some(stdout)
+}
+
+// Text for display, or None when over `max_bytes`, binary (contains NUL), or not UTF-8.
+pub fn decode_text_blob(bytes: Vec<u8>, max_bytes: usize) -> Option<String> {
+    if bytes.len() > max_bytes || bytes.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 // `git remote get-url origin` returns the remote URL; we only
@@ -145,95 +181,221 @@ pub fn parse_log(raw: &str) -> Vec<GitLogEntry> {
         .collect()
 }
 
-// Parse `git diff --name-status [range]`: each line is
-// "<status>\t<file>" (renames use a longer two-tab form, but the
-// Electron handler also flattens that to the first segment).
+// Parse `git diff --name-status -z [range]`: "<status>\0<path>\0", except renames and
+// copies ("R<score>" / "C<score>"): "<status>\0<old>\0<new>\0". With -z, paths are
+// verbatim (never C-quoted) and repository-root relative.
 pub fn parse_diff_files(raw: &str) -> Vec<GitFileEntry> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-    trimmed
-        .lines()
-        .map(|line| {
-            if let Some(tab_idx) = line.find('\t') {
-                GitFileEntry {
-                    status: line[..tab_idx].trim().to_string(),
-                    file: line[tab_idx + 1..].to_string(),
-                }
-            } else {
-                let status = line
-                    .chars()
-                    .next()
-                    .map(|c| c.to_string())
-                    .unwrap_or_default();
-                let file = if line.len() > 2 {
-                    line[2..].to_string()
-                } else {
-                    String::new()
-                };
-                GitFileEntry { status, file }
+    let mut fields = raw.split('\0');
+    let mut entries = Vec::new();
+    while let Some(status) = fields.next() {
+        let status = status.trim();
+        if status.is_empty() {
+            continue;
+        }
+        let Some(path) = fields.next() else { break };
+        let entry = if status.starts_with(['R', 'C']) {
+            let Some(new) = fields.next() else { break };
+            GitFileEntry {
+                status: status.to_string(),
+                file: new.to_string(),
+                old_file: Some(path.to_string()),
             }
-        })
-        .collect()
-}
-
-// Parse `git status --porcelain --untracked-files=all`: each line begins with two
-// status chars followed by a space and the path. Mirrors the
-// Electron parser (which trims the status field).
-pub fn parse_status(raw: &str) -> Vec<GitFileEntry> {
-    if raw.trim().is_empty() {
-        return Vec::new();
+        } else {
+            GitFileEntry {
+                status: status.to_string(),
+                file: path.to_string(),
+                old_file: None,
+            }
+        };
+        entries.push(entry);
     }
-    raw.split('\n')
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let status_end = line.len().min(2);
-            let status = line[..status_end].trim().to_string();
-            let file = if line.len() > 3 {
-                line[3..].to_string()
-            } else {
-                String::new()
-            };
-            GitFileEntry { status, file }
-        })
-        .collect()
+    entries
 }
 
-// Build the argv for `git diff` based on optional commit hash + path.
-// "working" is a magic string the renderer uses to mean "uncommitted
-// changes vs HEAD" — we map that to `git diff HEAD`.
+// Parse `git status --porcelain -z --untracked-files=all`: "XY <path>\0", and for a
+// rename or copy "XY <new>\0<old>\0". Paths are verbatim and repository-root relative.
+// The status field is trimmed, like the Electron parser.
+pub fn parse_status(raw: &str) -> Vec<GitFileEntry> {
+    let mut fields = raw.split('\0');
+    let mut entries = Vec::new();
+    while let Some(record) = fields.next() {
+        let (Some(xy), Some(path)) = (record.get(..2), record.get(3..)) else {
+            continue;
+        };
+        let old_file = if xy.contains(['R', 'C']) {
+            fields.next().map(str::to_string)
+        } else {
+            None
+        };
+        entries.push(GitFileEntry {
+            status: xy.trim().to_string(),
+            file: path.to_string(),
+            old_file,
+        });
+    }
+    entries
+}
+
+// A revision argument that git cannot mistake for an option.
+fn is_safe_revision(rev: &str) -> bool {
+    !rev.is_empty() && !rev.starts_with('-') && !rev.contains(['\0', '\n', '\r'])
+}
+
+fn is_safe_path(path: &str) -> bool {
+    !path.is_empty() && !path.contains('\0')
+}
+
+// Paths from git output are root relative, but a plain pathspec resolves against the cwd
+// (a workspace may be a repo subdirectory) and would glob `*`, `?` and `[`.
+fn root_literal_pathspec(path: &str) -> String {
+    format!(":(top,literal){path}")
+}
+
+// "working" means uncommitted changes vs HEAD. A commit's rename or copy is diffed
+// blob to blob, so changes to the source path in the same commit are not mixed in.
 pub fn build_diff_args<'a>(
     commit_hash: Option<&'a str>,
     file_path: Option<&'a str>,
-) -> Vec<String> {
-    let mut args: Vec<String> = vec!["diff".into()];
-    match commit_hash {
-        Some(hash) if !hash.is_empty() && hash != "working" => {
-            args.push(format!("{hash}~1..{hash}"));
+    old_file_path: Option<&'a str>,
+) -> Option<Vec<String>> {
+    let file_path = file_path.filter(|p| !p.is_empty());
+    let old_file_path = old_file_path.filter(|p| !p.is_empty() && Some(*p) != file_path);
+    let commit = commit_hash.filter(|hash| !hash.is_empty() && *hash != "working");
+    if commit.is_some_and(|hash| !is_safe_revision(hash)) {
+        return None;
+    }
+    if let (Some(hash), Some(new), Some(old)) = (commit, file_path, old_file_path) {
+        if !is_safe_path(new) || !is_safe_path(old) {
+            return None;
         }
-        _ => args.push("HEAD".into()),
+        return Some(vec![
+            "diff".into(),
+            format!("{hash}~1:{old}"),
+            format!("{hash}:{new}"),
+        ]);
+    }
+    let mut args: Vec<String> = vec!["diff".into()];
+    if file_path.is_some() && old_file_path.is_some() {
+        args.push("-M".into());
+    }
+    match commit {
+        Some(hash) => args.push(format!("{hash}~1..{hash}")),
+        None => args.push("HEAD".into()),
     }
     if let Some(p) = file_path {
-        if !p.is_empty() {
-            args.push("--".into());
-            args.push(p.to_string());
+        if !is_safe_path(p) || old_file_path.is_some_and(|old| !is_safe_path(old)) {
+            return None;
         }
+        args.push("--".into());
+        if let Some(old) = old_file_path {
+            args.push(root_literal_pathspec(old));
+        }
+        args.push(root_literal_pathspec(p));
     }
-    args
+    Some(args)
 }
 
-pub fn build_diff_files_args<'a>(commit_hash: Option<&'a str>) -> Vec<String> {
+// `cat-file blob` prints the stored content without checkout filters (EOL
+// conversion, smudge), which is the text `git diff` hunks refer to.
+pub fn build_show_file_args(rev: &str, file_path: &str) -> Option<Vec<String>> {
+    if !is_safe_revision(rev) || !is_safe_path(file_path) {
+        return None;
+    }
+    Some(vec![
+        "cat-file".into(),
+        "blob".into(),
+        format!("{rev}:{file_path}"),
+    ])
+}
+
+pub fn build_diff_files_args<'a>(commit_hash: Option<&'a str>) -> Option<Vec<String>> {
     match commit_hash {
         Some(hash) if !hash.is_empty() && hash != "working" => {
-            vec![
+            if !is_safe_revision(hash) {
+                return None;
+            }
+            Some(vec![
                 "diff".into(),
                 "--name-status".into(),
+                "-z".into(),
                 format!("{hash}~1..{hash}"),
-            ]
+            ])
         }
-        _ => vec!["diff".into(), "--name-status".into(), "HEAD".into()],
+        _ => Some(vec![
+            "diff".into(),
+            "--name-status".into(),
+            "-z".into(),
+            "HEAD".into(),
+        ]),
     }
+}
+
+// NUL-separated because names and the message may contain any other character; git rejects
+// NUL in commit messages, and the message (%B) is last so it needs no escaping.
+const COMMIT_DETAILS_FORMAT: &str = "%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B";
+const COMMIT_DETAILS_FIELDS: usize = 9;
+// Log output is decoded as UTF-8, so it must override i18n.logOutputEncoding (e.g. big5).
+pub const LOG_OUTPUT_ENCODING: &str = "--encoding=UTF-8";
+
+pub fn build_commit_details_args(commit_hash: &str) -> Option<Vec<String>> {
+    if !is_safe_revision(commit_hash) || commit_hash == "working" {
+        return None;
+    }
+    Some(vec![
+        "log".into(),
+        "-1".into(),
+        "--no-show-signature".into(),
+        "--no-color".into(),
+        LOG_OUTPUT_ENCODING.into(),
+        format!("--format={COMMIT_DETAILS_FORMAT}"),
+        commit_hash.into(),
+        "--".into(),
+    ])
+}
+
+pub fn parse_commit_details(raw: &str) -> Option<GitCommitDetails> {
+    let fields: Vec<&str> = raw.splitn(COMMIT_DETAILS_FIELDS, '\0').collect();
+    let [
+        hash,
+        parents,
+        author_name,
+        author_email,
+        author_date,
+        committer_name,
+        committer_email,
+        committer_date,
+        message,
+    ] = fields.as_slice()
+    else {
+        return None;
+    };
+    if !is_object_id(hash) {
+        return None;
+    }
+    let parents: Vec<String> = parents.split_whitespace().map(str::to_string).collect();
+    if !parents.iter().all(|parent| is_object_id(parent)) {
+        return None;
+    }
+    Some(GitCommitDetails {
+        hash: hash.to_string(),
+        parents,
+        author_name: author_name.to_string(),
+        author_email: author_email.to_string(),
+        author_date: author_date.to_string(),
+        committer_name: committer_name.to_string(),
+        committer_email: committer_email.to_string(),
+        committer_date: committer_date.to_string(),
+        message: message.trim_end_matches(['\n', '\r']).to_string(),
+    })
+}
+
+pub fn build_status_args() -> Vec<String> {
+    vec![
+        "status".into(),
+        "--porcelain".into(),
+        "-z".into(),
+        "--untracked-files=all".into(),
+    ]
 }
 
 pub fn clamp_log_count(count: Option<i64>) -> u32 {
@@ -254,6 +416,7 @@ pub fn build_graph_log_args(count: Option<i64>, scope: Option<&str>) -> Vec<Stri
         "--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s".into(),
         "-n".into(),
         clamp_log_count(count).to_string(),
+        LOG_OUTPUT_ENCODING.into(),
         // Must precede the revisions; it lets an unborn HEAD log nothing instead of failing.
         "--ignore-missing".into(),
     ];
@@ -409,81 +572,116 @@ mod tests {
         assert_eq!(entries[1].message, "m2");
     }
 
+    fn entry(status: &str, file: &str) -> GitFileEntry {
+        GitFileEntry {
+            status: status.into(),
+            file: file.into(),
+            old_file: None,
+        }
+    }
+
+    fn renamed(status: &str, old: &str, new: &str) -> GitFileEntry {
+        GitFileEntry {
+            status: status.into(),
+            file: new.into(),
+            old_file: Some(old.into()),
+        }
+    }
+
     #[test]
     fn parse_diff_files_basic() {
-        let raw = "M\tsrc/foo.rs\nA\tsrc/bar.rs\nD\told/baz.rs";
-        let entries = parse_diff_files(raw);
-        assert_eq!(entries.len(), 3);
+        let raw = "M\0src/foo.rs\0A\0src/bar.rs\0D\0old/baz.rs\0";
         assert_eq!(
-            entries[0],
-            GitFileEntry {
-                status: "M".into(),
-                file: "src/foo.rs".into()
-            }
-        );
-        assert_eq!(
-            entries[2],
-            GitFileEntry {
-                status: "D".into(),
-                file: "old/baz.rs".into()
-            }
+            parse_diff_files(raw),
+            vec![
+                entry("M", "src/foo.rs"),
+                entry("A", "src/bar.rs"),
+                entry("D", "old/baz.rs"),
+            ]
         );
     }
 
     #[test]
-    fn parse_diff_files_no_tab_fallback() {
-        // Defensive: if the line lacks a tab, take first char as
-        // status and skip a couple chars for the file. Mirrors the
-        // Electron substring(2) fallback.
-        let raw = "M  some/odd/file.rs";
-        let entries = parse_diff_files(raw);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].status, "M");
+    fn parse_diff_files_splits_renames_and_copies() {
+        let raw = "R098\0old/a.cpp\0new/dir/a.cpp\0C075\0src/b.h\0src/c.h\0M\0keep.rs\0";
+        assert_eq!(
+            parse_diff_files(raw),
+            vec![
+                renamed("R098", "old/a.cpp", "new/dir/a.cpp"),
+                renamed("C075", "src/b.h", "src/c.h"),
+                entry("M", "keep.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_diff_files_keeps_paths_verbatim() {
+        let raw = "M\0中文.txt\0R100\0é.txt\0dir/sp ace\ttab\"q\".txt\0A\0sub/st*ar[1]?.txt\0";
+        assert_eq!(
+            parse_diff_files(raw),
+            vec![
+                entry("M", "中文.txt"),
+                renamed("R100", "é.txt", "dir/sp ace\ttab\"q\".txt"),
+                entry("A", "sub/st*ar[1]?.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_diff_files_handles_empty_and_truncated_output() {
+        assert_eq!(parse_diff_files(""), Vec::<GitFileEntry>::new());
+        assert_eq!(parse_diff_files("M\0a.rs\0R090\0old.rs"), vec![entry("M", "a.rs")]);
+    }
+
+    #[test]
+    fn git_file_entry_json_omits_missing_old_file() {
+        let plain = serde_json::to_value(entry("M", "a.rs")).unwrap();
+        assert_eq!(plain, serde_json::json!({ "status": "M", "file": "a.rs" }));
+        assert_eq!(
+            serde_json::to_value(renamed("R100", "a.rs", "b.rs")).unwrap(),
+            serde_json::json!({ "status": "R100", "file": "b.rs", "oldFile": "a.rs" })
+        );
+        let from_old_host: GitFileEntry =
+            serde_json::from_value(serde_json::json!({ "status": "M", "file": "a.rs" })).unwrap();
+        assert_eq!(from_old_host, entry("M", "a.rs"));
     }
 
     #[test]
     fn parse_status_porcelain() {
-        let raw = " M src/foo.rs\n?? new.txt\nMM both.rs\n";
-        let entries = parse_status(raw);
-        assert_eq!(entries.len(), 3);
+        let raw = " M src/foo.rs\0?? new.txt\0MM both.rs\0";
         assert_eq!(
-            entries[0],
-            GitFileEntry {
-                status: "M".into(),
-                file: "src/foo.rs".into()
-            }
-        );
-        assert_eq!(
-            entries[1],
-            GitFileEntry {
-                status: "??".into(),
-                file: "new.txt".into()
-            }
-        );
-        assert_eq!(
-            entries[2],
-            GitFileEntry {
-                status: "MM".into(),
-                file: "both.rs".into()
-            }
+            parse_status(raw),
+            vec![
+                entry("M", "src/foo.rs"),
+                entry("??", "new.txt"),
+                entry("MM", "both.rs"),
+            ]
         );
     }
 
     #[test]
-    fn parse_status_keeps_untracked_folder_files() {
-        let raw = "?? generated/output.txt\n?? generated/nested/file.log\n";
-        let entries = parse_status(raw);
+    fn parse_status_reads_staged_renames_and_copies() {
+        let raw = "R  中文.txt\0é.txt\0RM new.rs\0old.rs\0C  copy.rs\0src.rs\0 M sp ace.txt\0";
         assert_eq!(
-            entries,
+            parse_status(raw),
             vec![
-                GitFileEntry {
-                    status: "??".into(),
-                    file: "generated/output.txt".into(),
-                },
-                GitFileEntry {
-                    status: "??".into(),
-                    file: "generated/nested/file.log".into(),
-                },
+                renamed("R", "é.txt", "中文.txt"),
+                renamed("RM", "old.rs", "new.rs"),
+                renamed("C", "src.rs", "copy.rs"),
+                entry("M", "sp ace.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_status_keeps_paths_verbatim() {
+        let raw = "?? generated/output.txt\0?? tab\tq\"uote\".txt\0A  新 file*.txt\0";
+        assert_eq!(
+            parse_status(raw),
+            vec![
+                entry("??", "generated/output.txt"),
+                entry("??", "tab\tq\"uote\".txt"),
+                entry("A", "新 file*.txt"),
             ]
         );
     }
@@ -491,65 +689,272 @@ mod tests {
     #[test]
     fn parse_status_empty_returns_empty() {
         assert_eq!(parse_status(""), Vec::<GitFileEntry>::new());
-        assert_eq!(parse_status("\n\n"), Vec::<GitFileEntry>::new());
+        assert_eq!(parse_status("\0"), Vec::<GitFileEntry>::new());
+    }
+
+    #[test]
+    fn build_status_args_use_nul_separated_porcelain() {
+        assert_eq!(
+            Some(build_status_args()),
+            argv(&["status", "--porcelain", "-z", "--untracked-files=all"]),
+        );
+    }
+
+    fn argv(items: &[&str]) -> Option<Vec<String>> {
+        Some(items.iter().map(|item| item.to_string()).collect())
     }
 
     #[test]
     fn build_diff_args_default() {
-        assert_eq!(
-            build_diff_args(None, None),
-            vec!["diff".to_string(), "HEAD".into()]
-        );
+        assert_eq!(build_diff_args(None, None, None), argv(&["diff", "HEAD"]));
     }
 
     #[test]
     fn build_diff_args_working_keyword() {
         // "working" is the renderer's sentinel for HEAD/uncommitted.
         assert_eq!(
-            build_diff_args(Some("working"), None),
-            vec!["diff".to_string(), "HEAD".into()],
+            build_diff_args(Some("working"), None, None),
+            argv(&["diff", "HEAD"]),
+        );
+        assert_eq!(
+            build_diff_args(Some("working"), Some("src/a.rs"), None),
+            argv(&["diff", "HEAD", "--", ":(top,literal)src/a.rs"]),
         );
     }
 
     #[test]
     fn build_diff_args_with_commit_and_path() {
         assert_eq!(
-            build_diff_args(Some("abc123"), Some("src/foo.rs")),
-            vec![
-                "diff".to_string(),
-                "abc123~1..abc123".into(),
-                "--".into(),
-                "src/foo.rs".into(),
-            ],
+            build_diff_args(Some("abc123"), Some("src/foo.rs"), None),
+            argv(&["diff", "abc123~1..abc123", "--", ":(top,literal)src/foo.rs"]),
+        );
+    }
+
+    #[test]
+    fn build_diff_args_pathspec_is_root_relative_and_literal() {
+        assert_eq!(
+            build_diff_args(Some("abc"), Some("中文 dir/st*ar[1]?.txt"), None),
+            argv(&["diff", "abc~1..abc", "--", ":(top,literal)中文 dir/st*ar[1]?.txt"]),
         );
     }
 
     #[test]
     fn build_diff_args_empty_commit_falls_back_to_head() {
         assert_eq!(
-            build_diff_args(Some(""), None),
-            vec!["diff".to_string(), "HEAD".into()],
+            build_diff_args(Some(""), None, None),
+            argv(&["diff", "HEAD"]),
         );
+    }
+
+    #[test]
+    fn build_diff_args_pairs_a_rename() {
+        assert_eq!(
+            build_diff_args(Some("abc"), Some("new/a.cpp"), Some("old/a.cpp")),
+            argv(&["diff", "abc~1:old/a.cpp", "abc:new/a.cpp"]),
+        );
+        assert_eq!(build_diff_args(Some("abc"), Some("b.rs"), Some("a\0b")), None);
+        assert_eq!(build_diff_args(Some("-p"), Some("b.rs"), Some("a.rs")), None);
+        assert_eq!(
+            build_diff_args(Some("working"), Some("b.rs"), Some("a.rs")),
+            argv(&[
+                "diff",
+                "-M",
+                "HEAD",
+                "--",
+                ":(top,literal)a.rs",
+                ":(top,literal)b.rs",
+            ]),
+        );
+    }
+
+    #[test]
+    fn build_diff_args_ignores_unusable_old_path() {
+        let expected = argv(&["diff", "abc~1..abc", "--", ":(top,literal)a.rs"]);
+        assert_eq!(build_diff_args(Some("abc"), Some("a.rs"), Some("")), expected);
+        assert_eq!(build_diff_args(Some("abc"), Some("a.rs"), Some("a.rs")), expected);
+        assert_eq!(
+            build_diff_args(Some("abc"), None, Some("a.rs")),
+            argv(&["diff", "abc~1..abc"]),
+        );
+    }
+
+    #[test]
+    fn build_diff_args_rejects_option_like_revisions() {
+        assert_eq!(build_diff_args(Some("--output=x"), Some("a.rs"), None), None);
+        assert_eq!(build_diff_args(Some("-p"), None, None), None);
+        assert_eq!(build_diff_args(Some("abc\n--output=x"), None, None), None);
     }
 
     #[test]
     fn build_diff_files_args_variants() {
         assert_eq!(
             build_diff_files_args(None),
-            vec!["diff".to_string(), "--name-status".into(), "HEAD".into()],
+            argv(&["diff", "--name-status", "-z", "HEAD"]),
         );
         assert_eq!(
             build_diff_files_args(Some("abc")),
-            vec![
-                "diff".to_string(),
-                "--name-status".into(),
-                "abc~1..abc".into()
-            ],
+            argv(&["diff", "--name-status", "-z", "abc~1..abc"]),
         );
         assert_eq!(
             build_diff_files_args(Some("working")),
-            vec!["diff".to_string(), "--name-status".into(), "HEAD".into()],
+            argv(&["diff", "--name-status", "-z", "HEAD"]),
         );
+        assert_eq!(build_diff_files_args(Some("--output=x")), None);
+    }
+
+    #[test]
+    fn build_show_file_args_reads_the_blob_at_a_revision() {
+        assert_eq!(
+            build_show_file_args("abc123", "src/foo.rs"),
+            argv(&["cat-file", "blob", "abc123:src/foo.rs"]),
+        );
+        assert_eq!(
+            build_show_file_args("abc123~1", "中文 dir/a\tb*.txt"),
+            argv(&["cat-file", "blob", "abc123~1:中文 dir/a\tb*.txt"]),
+        );
+    }
+
+    #[test]
+    fn decode_text_blob_enforces_the_size_cap() {
+        assert_eq!(decode_text_blob(b"abcd".to_vec(), 4), Some("abcd".into()));
+        assert_eq!(decode_text_blob(b"abcde".to_vec(), 4), None);
+        assert_eq!(decode_text_blob(Vec::new(), 4), Some(String::new()));
+    }
+
+    #[test]
+    fn decode_text_blob_rejects_binary_and_invalid_utf8() {
+        assert_eq!(decode_text_blob(b"a\0b".to_vec(), 64), None);
+        assert_eq!(decode_text_blob(vec![0xA4, 0xA4, 0xA4, 0xE5], 64), None);
+        assert_eq!(
+            decode_text_blob("中文 line\r\n".as_bytes().to_vec(), 64),
+            Some("中文 line\r\n".into())
+        );
+    }
+
+    #[test]
+    fn run_git_bytes_returns_none_over_the_cap() {
+        let cwd = env!("CARGO_MANIFEST_DIR");
+        let full = run_git_bytes(cwd, &["--version"], Duration::from_secs(30), 1024)
+            .expect("git --version");
+        assert!(run_git_bytes(cwd, &["--version"], Duration::from_secs(30), full.len() - 1).is_none());
+    }
+
+    #[test]
+    fn build_show_file_args_rejects_unsafe_input() {
+        assert_eq!(build_show_file_args("", "a.rs"), None);
+        assert_eq!(build_show_file_args("-p", "a.rs"), None);
+        assert_eq!(build_show_file_args("--batch", "a.rs"), None);
+        assert_eq!(build_show_file_args("abc", ""), None);
+        assert_eq!(build_show_file_args("abc", "a\0b"), None);
+        assert_eq!(build_show_file_args("abc\r", "a.rs"), None);
+    }
+
+    const DETAILS_HASH_A: &str = "0123456789abcdef0123456789abcdef01234567";
+    const DETAILS_HASH_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
+    const DETAILS_HASH_C: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+    fn details_raw(parents: &str, message: &str) -> String {
+        [
+            DETAILS_HASH_A,
+            parents,
+            "Ada Lovelace",
+            "ada@example.com",
+            "2026-11-13T15:28:21+08:00",
+            "Grace Hopper",
+            "grace@example.com",
+            "2026-11-13T16:00:00+08:00",
+            message,
+        ]
+        .join("\0")
+    }
+
+    #[test]
+    fn build_commit_details_args_validates_the_revision() {
+        assert_eq!(
+            build_commit_details_args(DETAILS_HASH_A),
+            argv(&[
+                "log",
+                "-1",
+                "--no-show-signature",
+                "--no-color",
+                "--encoding=UTF-8",
+                "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B",
+                DETAILS_HASH_A,
+                "--",
+            ]),
+        );
+        assert_eq!(build_commit_details_args(""), None);
+        assert_eq!(build_commit_details_args("working"), None);
+        assert_eq!(build_commit_details_args("--output=x"), None);
+        assert_eq!(build_commit_details_args("abc\n-p"), None);
+    }
+
+    #[test]
+    fn parse_commit_details_keeps_a_multi_line_body() {
+        let message = "feat: subject line\n\nBody line one\n  indented: two\n\nTrailer: x\n\n";
+        let details = parse_commit_details(&details_raw(DETAILS_HASH_B, message)).unwrap();
+        assert_eq!(details.hash, DETAILS_HASH_A);
+        assert_eq!(details.parents, vec![DETAILS_HASH_B.to_string()]);
+        assert_eq!(details.author_name, "Ada Lovelace");
+        assert_eq!(details.author_email, "ada@example.com");
+        assert_eq!(details.author_date, "2026-11-13T15:28:21+08:00");
+        assert_eq!(details.committer_name, "Grace Hopper");
+        assert_eq!(details.committer_email, "grace@example.com");
+        assert_eq!(details.committer_date, "2026-11-13T16:00:00+08:00");
+        assert_eq!(
+            details.message,
+            "feat: subject line\n\nBody line one\n  indented: two\n\nTrailer: x"
+        );
+    }
+
+    #[test]
+    fn parse_commit_details_handles_an_empty_body() {
+        let details = parse_commit_details(&details_raw(DETAILS_HASH_B, "fix: only a subject\n\n")).unwrap();
+        assert_eq!(details.message, "fix: only a subject");
+    }
+
+    #[test]
+    fn parse_commit_details_lists_both_parents_of_a_merge() {
+        let details =
+            parse_commit_details(&details_raw(&format!("{DETAILS_HASH_B} {DETAILS_HASH_C}"), "Merge x\n")).unwrap();
+        assert_eq!(details.parents, vec![DETAILS_HASH_B.to_string(), DETAILS_HASH_C.to_string()]);
+    }
+
+    #[test]
+    fn parse_commit_details_root_commit_has_no_parents() {
+        let details = parse_commit_details(&details_raw("", "initial\n")).unwrap();
+        assert!(details.parents.is_empty());
+    }
+
+    #[test]
+    fn parse_commit_details_keeps_non_ascii_text() {
+        let raw = [
+            DETAILS_HASH_A, "", "王小明", "ming@例子.tw", "2026-01-02T03:04:05+08:00", "Zoë", "z@x",
+            "2026-01-02T03:04:05+08:00", "修正：中文訊息\n\n內文 NUL-free\tTab\n",
+        ]
+        .join("\0");
+        let details = parse_commit_details(&raw).unwrap();
+        assert_eq!(details.author_name, "王小明");
+        assert_eq!(details.author_email, "ming@例子.tw");
+        assert_eq!(details.committer_name, "Zoë");
+        assert_eq!(details.message, "修正：中文訊息\n\n內文 NUL-free\tTab");
+    }
+
+    #[test]
+    fn parse_commit_details_rejects_malformed_output() {
+        assert_eq!(parse_commit_details(""), None);
+        assert_eq!(parse_commit_details("not-a-hash\0\0a\0b\0c\0d\0e\0f\0m"), None);
+        assert_eq!(parse_commit_details(&format!("{DETAILS_HASH_A}\0bogus\0a\0b\0c\0d\0e\0f\0m")), None);
+        assert_eq!(parse_commit_details(&format!("{DETAILS_HASH_A}\0\0a\0b")), None);
+    }
+
+    #[test]
+    fn git_commit_details_json_is_camel_case() {
+        let details = parse_commit_details(&details_raw("", "m")).unwrap();
+        let value = serde_json::to_value(&details).unwrap();
+        assert_eq!(value["authorName"], "Ada Lovelace");
+        assert_eq!(value["committerDate"], "2026-11-13T16:00:00+08:00");
+        assert_eq!(value["parents"], serde_json::json!([]));
     }
 
     #[test]
@@ -601,6 +1006,7 @@ mod tests {
                 "--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s",
                 "-n",
                 "50",
+                "--encoding=UTF-8",
                 "--ignore-missing",
                 "HEAD",
                 "--",

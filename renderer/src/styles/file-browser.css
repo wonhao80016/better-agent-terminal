@@ -601,19 +601,97 @@
   opacity: 0.7;
 }
 
-/* Column 2: Changed files */
-.git-file-list {
-  flex: 0 0 22%;
-  max-width: 22%;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border-color);
-  overflow: hidden;
+/* Expanded commit: details and changed files under the row */
+.git-commit-details {
+  position: relative;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 
-.git-file-list-items {
-  flex: 1;
-  overflow-y: auto;
+.git-commit-details.git-commit-details-graph {
+  padding-left: calc(min(var(--git-graph-width), 40%) + 4px);
+}
+
+.git-commit-details-status {
+  padding: 4px 0 6px;
+}
+
+.git-commit-details-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  margin: 0 0 6px;
+}
+
+.git-commit-details-fields dt {
+  color: var(--text-secondary);
+}
+
+.git-commit-details-fields dd {
+  margin: 0;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.git-commit-details-hash {
+  font-family: monospace;
+  user-select: text;
+}
+
+.git-commit-parent-link,
+.git-commit-parent-hash {
+  margin-right: 6px;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.git-commit-parent-link {
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--accent-color, #d97706);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.git-commit-parent-hash {
+  color: var(--text-secondary);
+}
+
+.git-commit-details-message {
+  margin-bottom: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.git-commit-details-files {
+  margin: 0 -8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.git-commit-details-graph .git-commit-details-files {
+  margin-left: 0;
+}
+
+.git-commit-details-files-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+}
+
+.git-commit-item:focus-visible {
+  outline: 1px solid var(--accent-color, #d97706);
+  outline-offset: -1px;
 }
 
 .git-file-count {
@@ -649,7 +727,7 @@
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
-  width: 16px;
+  min-width: 16px;
   text-align: center;
 }
 
@@ -670,7 +748,7 @@
   min-width: 0;
 }
 
-/* Column 3: Diff view */
+/* Column 2: Diff view */
 .git-diff-view {
   flex: 1;
   display: flex;

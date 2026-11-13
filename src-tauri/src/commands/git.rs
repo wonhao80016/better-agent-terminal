@@ -16,13 +16,14 @@ use crate::commands::profile as profile_cmd;
 use crate::remote_client::RustRemoteClientState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
-use bat_git::git::run_git;
+use bat_git::git::{decode_text_blob, run_git, run_git_bytes};
 use bat_git::head::{lookup_head, HeadLookup};
 use std::path::Path;
 pub use bat_git::git::{
-    build_diff_args, build_diff_files_args, build_graph_log_args, clamp_log_count,
-    parse_diff_files, parse_github_url, parse_graph_log, parse_log, parse_status, GitFileEntry,
-    GitGraphLogEntry, GitLogEntry,
+    build_diff_args, build_diff_files_args, build_graph_log_args, build_show_file_args,
+    build_commit_details_args, build_status_args, clamp_log_count, parse_commit_details,
+    parse_diff_files, parse_github_url, parse_graph_log, parse_log, parse_status,
+    GitCommitDetails, GitFileEntry, GitGraphLogEntry, GitLogEntry, LOG_OUTPUT_ENCODING,
 };
 #[cfg(feature = "desktop")]
 use serde::de::DeserializeOwned;
@@ -187,6 +188,7 @@ pub(crate) async fn git_get_log_native(cwd: String, count: Option<i64>) -> Vec<G
     let n_str = n.to_string();
     let args = vec![
         "log".into(),
+        LOG_OUTPUT_ENCODING.into(),
         "--pretty=format:%H||%an||%aI||%s".into(),
         "-n".into(),
         n_str,
@@ -242,12 +244,18 @@ pub async fn git_get_diff(
     cwd: String,
     commit_hash: Option<String>,
     file_path: Option<String>,
+    old_file_path: Option<String>,
 ) -> String {
     if let Some(result) = remote_invoke_for_window(
         &app,
         &window,
         "git:diff",
-        vec![json!(cwd.clone()), json!(commit_hash), json!(file_path)],
+        vec![
+            json!(cwd.clone()),
+            json!(commit_hash),
+            json!(file_path),
+            json!(old_file_path),
+        ],
     )
     .await
     {
@@ -255,18 +263,102 @@ pub async fn git_get_diff(
             .and_then(from_remote_value)
             .unwrap_or_else(|_| String::new());
     }
-    git_get_diff_native(cwd, commit_hash, file_path).await
+    git_get_diff_native(cwd, commit_hash, file_path, old_file_path).await
 }
 
 pub(crate) async fn git_get_diff_native(
     cwd: String,
     commit_hash: Option<String>,
     file_path: Option<String>,
+    old_file_path: Option<String>,
 ) -> String {
-    let argv = build_diff_args(commit_hash.as_deref(), file_path.as_deref());
+    let Some(argv) = build_diff_args(
+        commit_hash.as_deref(),
+        file_path.as_deref(),
+        old_file_path.as_deref(),
+    ) else {
+        return String::new();
+    };
     run_git_blocking(cwd, argv, Duration::from_secs(10))
         .await
         .unwrap_or_default()
+}
+
+// Ok(None) when the path does not exist at `rev`, the object is not a blob, or git fails.
+// Err only when a remote host cannot serve the call (e.g. one without `git:show-file`).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn git_show_file(
+    app: AppHandle,
+    window: WebviewWindow,
+    cwd: String,
+    rev: String,
+    file_path: String,
+) -> Result<Option<String>, String> {
+    if let Some(result) = remote_invoke_for_window(
+        &app,
+        &window,
+        "git:show-file",
+        vec![json!(cwd.clone()), json!(rev), json!(file_path)],
+    )
+    .await
+    {
+        return result.and_then(from_remote_value::<Option<String>>);
+    }
+    Ok(git_show_file_native(cwd, rev, file_path).await)
+}
+
+// Uses the working-tree reader's size cap (MAX_READ_BYTES); content that is not UTF-8 or
+// contains NUL is also refused, so binary files are never shown as text.
+pub(crate) async fn git_show_file_native(
+    cwd: String,
+    rev: String,
+    file_path: String,
+) -> Option<String> {
+    let argv = build_show_file_args(&rev, &file_path)?;
+    let max_bytes = bat_filesystem::MAX_READ_BYTES as usize;
+    crate::async_rt::spawn_blocking(move || {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let bytes = run_git_bytes(&cwd, &refs, Duration::from_secs(10), max_bytes)?;
+        decode_text_blob(bytes, max_bytes)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+// None when the revision is invalid, git fails, or a remote host lacks `git:commit-details`.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn git_get_commit_details(
+    app: AppHandle,
+    window: WebviewWindow,
+    cwd: String,
+    commit_hash: String,
+) -> Option<GitCommitDetails> {
+    if let Some(result) = remote_invoke_for_window(
+        &app,
+        &window,
+        "git:commit-details",
+        vec![json!(cwd.clone()), json!(commit_hash)],
+    )
+    .await
+    {
+        return result
+            .and_then(from_remote_value::<Option<GitCommitDetails>>)
+            .ok()
+            .flatten();
+    }
+    git_get_commit_details_native(cwd, commit_hash).await
+}
+
+pub(crate) async fn git_get_commit_details_native(
+    cwd: String,
+    commit_hash: String,
+) -> Option<GitCommitDetails> {
+    let argv = build_commit_details_args(&commit_hash)?;
+    let raw = run_git_blocking(cwd, argv, Duration::from_secs(5)).await?;
+    parse_commit_details(&raw)
 }
 
 #[cfg(feature = "desktop")]
@@ -296,7 +388,9 @@ pub(crate) async fn git_get_diff_files_native(
     cwd: String,
     commit_hash: Option<String>,
 ) -> Vec<GitFileEntry> {
-    let argv = build_diff_files_args(commit_hash.as_deref());
+    let Some(argv) = build_diff_files_args(commit_hash.as_deref()) else {
+        return Vec::new();
+    };
     match run_git_blocking(cwd, argv, Duration::from_secs(5)).await {
         Some(raw) => parse_diff_files(&raw),
         None => Vec::new(),
@@ -350,17 +444,7 @@ pub async fn git_get_status(
 }
 
 pub(crate) async fn git_get_status_native(cwd: String) -> Vec<GitFileEntry> {
-    match run_git_blocking(
-        cwd,
-        vec![
-            "status".into(),
-            "--porcelain".into(),
-            "--untracked-files=all".into(),
-        ],
-        Duration::from_secs(5),
-    )
-    .await
-    {
+    match run_git_blocking(cwd, build_status_args(), Duration::from_secs(5)).await {
         Some(raw) => parse_status(&raw),
         None => Vec::new(),
     }

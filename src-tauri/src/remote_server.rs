@@ -3709,11 +3709,28 @@ fn invoke_rust_for_remote(
         "git:diff" => string_param(params, "cwd", channel).and_then(|cwd| {
             let commit_hash = optional_string_param(params, "commitHash");
             let file_path = optional_string_param(params, "filePath");
+            let old_file_path = optional_string_param(params, "oldFilePath");
             let value = crate::async_rt::block_on(git_cmd::git_get_diff_native(
                 cwd,
                 commit_hash,
                 file_path,
+                old_file_path,
             ));
+            to_json_value(channel, value)
+        }),
+        "git:commit-details" => string_param(params, "cwd", channel).and_then(|cwd| {
+            let commit_hash = string_param(params, "commitHash", channel)?;
+            let value = crate::async_rt::block_on(git_cmd::git_get_commit_details_native(
+                cwd,
+                commit_hash,
+            ));
+            to_json_value(channel, value)
+        }),
+        "git:show-file" => string_param(params, "cwd", channel).and_then(|cwd| {
+            let rev = string_param(params, "rev", channel)?;
+            let file_path = string_param(params, "filePath", channel)?;
+            let value =
+                crate::async_rt::block_on(git_cmd::git_show_file_native(cwd, rev, file_path));
             to_json_value(channel, value)
         }),
         "git:diff-files" => string_param(params, "cwd", channel).and_then(|cwd| {

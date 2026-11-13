@@ -963,10 +963,29 @@ function createTauriHost(): BatAppAPI {
           date: string
           message: string
         }[] | null>('git_get_graph_log', { cwd, count, scope }),
-      getDiff: (cwd: string, commitHash?: string, filePath?: string) =>
-        getInvoke()<string>('git_get_diff', { cwd, commitHash, filePath }),
+      // oldFilePath pairs a rename's source with filePath so only the edits show.
+      getDiff: (cwd: string, commitHash?: string, filePath?: string, oldFilePath?: string) =>
+        getInvoke()<string>('git_get_diff', { cwd, commitHash, filePath, oldFilePath }),
+      // Content of a repo-relative path at a revision; null when it does not exist there.
+      // Rejects when a remote host cannot serve it (a host built before this command).
+      showFile: (cwd: string, rev: string, filePath: string) =>
+        getInvoke()<string | null>('git_show_file', { cwd, rev, filePath }),
+      // null when the revision is invalid, git fails, or the host predates this command.
+      getCommitDetails: (cwd: string, commitHash: string) =>
+        getInvoke()<{
+          hash: string
+          parents: string[]
+          authorName: string
+          authorEmail: string
+          authorDate: string
+          committerName: string
+          committerEmail: string
+          committerDate: string
+          message: string
+        } | null>('git_get_commit_details', { cwd, commitHash }),
+      // oldFile is set for renames and copies (status R<score> / C<score>).
       getDiffFiles: (cwd: string, commitHash?: string) =>
-        getInvoke()<{ status: string; file: string }[]>(
+        getInvoke()<{ status: string; file: string; oldFile?: string }[]>(
           'git_get_diff_files',
           { cwd, commitHash },
         ),

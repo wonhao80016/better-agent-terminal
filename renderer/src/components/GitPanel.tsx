@@ -1,13 +1,22 @@
 import { host } from '../host-api'
-import { Fragment, useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react'
+import { Fragment, useState, useEffect, useCallback, useMemo, useReducer, useRef, type CSSProperties, type KeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
 import { ResizeHandle } from './ResizeHandle'
-import { GitGraphCell, GitGraphToggleIcon, GitRefBadges, graphWidthStyle } from './GitGraph'
+import { GitGraphCell, GitGraphContinuation, GitGraphToggleIcon, GitRefBadges, graphWidthStyle } from './GitGraph'
 import { useResizablePaneWidth } from '../hooks/useResizablePaneWidth'
 import { buildInlineFileRows, changeBlockEnd, changeBlockStarts, parseUnifiedDiff, splitContentLines, type DiffRow } from '../utils/unified-diff'
-import { buildGraphRows, computeGitGraph, findHeadHash, parseGraphEnabled, parseGraphScope, type GitGraphScope } from '../lib/git-graph'
+import { buildGraphRows, computeGitGraph, findHeadHash, parseGraphEnabled, parseGraphScope, UNCOMMITTED_ROW_HASH, type GitGraphScope, type GraphRowLayout } from '../lib/git-graph'
+import {
+  CommitDetailsCache,
+  committerDiffersFromAuthor,
+  formatCommitDateTime,
+  nextExpandedCommit,
+  parentLinks,
+  type CommitDetailsEntry,
+} from '../lib/git-commit-details'
 import { createGraphLogSource, type GraphLogResult } from '../lib/git-graph-source'
+import { formatErrorMessage } from '../utils/error-message'
 
 interface GitCommit {
   hash: string
@@ -19,6 +28,7 @@ interface GitCommit {
 interface GitStatusEntry {
   status: string
   file: string
+  oldFile?: string
 }
 
 interface WorktreeEntry {
@@ -33,8 +43,10 @@ interface GitPanelProps {
 
 const TEXT_EXTS = new Set([
   'ts', 'tsx', 'js', 'jsx', 'json', 'css', 'scss', 'less', 'html', 'htm',
-  'md', 'txt', 'yml', 'yaml', 'toml', 'xml', 'svg', 'sh', 'bash', 'zsh',
+  'md', 'txt', 'text', 'yml', 'yaml', 'toml', 'xml', 'svg', 'sh', 'bash', 'zsh',
   'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'cs',
+  'cc', 'cxx', 'hxx', 'inf', 'rc', 'def', 'sln', 'vcxproj', 'filters', 'props', 'targets',
+  'ps1', 'bat', 'cmd', 'mjs',
   'env', 'gitignore', 'editorconfig', 'prettierrc', 'eslintrc',
   'dockerfile', 'makefile', 'cfg', 'ini', 'conf', 'log',
 ])
@@ -120,7 +132,7 @@ function formatDate(dateStr: string): string {
 }
 
 function statusColor(s: string): string {
-  switch (s) {
+  switch (/^[RC]/.test(s) ? 'R' : s) {
     case 'M': return '#d97706'
     case 'A': case '??': return '#4ec9b0'
     case 'D': return '#f44336'
@@ -198,6 +210,62 @@ function newFileDiff(filePath: string, content: string): string {
   return `diff --git a/${filePath} b/${filePath}\nnew file\n--- /dev/null\n+++ b/${filePath}\n@@ -0,0 +1,${contentLines.length} @@\n${lines}`
 }
 
+const UNREADABLE_FILE = 'Unable to read file'
+
+// A rename/copy pair is diffed blob to blob, which carries no rename lines; restore them.
+function pairDiffHeader(entry: GitStatusEntry): string {
+  if (!entry.oldFile) return ''
+  const kind = entry.status.startsWith('C') ? 'copy' : 'rename'
+  const score = /^[RC](\d+)$/.exec(entry.status)?.[1]
+  return `${score ? `similarity index ${Number(score)}%\n` : ''}${kind} from ${entry.oldFile}\n${kind} to ${entry.file}\n`
+}
+
+// Only a commit's blob-to-blob pair lacks rename lines. A working-tree pair (-M) has its own,
+// and a host that predates oldFilePath returns the new path as a whole new file.
+async function fetchFileDiff(cwd: string, commit: string | undefined, filePath: string, entry?: GitStatusEntry): Promise<string> {
+  const diff = await host.git.getDiff(cwd, commit, filePath, entry?.oldFile)
+  const isPairDiff = !!entry?.oldFile && !/^((new|deleted) file mode |(rename|copy) from )/m.test(diff)
+  return isPairDiff ? pairDiffHeader(entry) + diff : diff
+}
+
+// Error text from a host without git_show_file: the sidecar's JSON-RPC -32601 for a remote
+// host built before git:show-file, or Tauri's unknown-command rejection.
+function isMissingShowFileCommand(error: unknown): boolean {
+  return /method not found: git\.showFile|command git_show_file not found/i.test(formatErrorMessage(error, ''))
+}
+
+// undefined when the host has no show-file command; null when the file cannot be shown.
+function showFileAt(cwd: string, rev: string, filePath: string): Promise<string | null | undefined> {
+  return host.git.showFile(cwd, rev, filePath).catch((error: unknown) => isMissingShowFileCommand(error) ? undefined : null)
+}
+
+interface CommitFileView {
+  content: string
+  fileDiff: string
+  diff: string
+}
+
+// The content must be the commit's own version so it lines up with the commit's diff. A deleted
+// file is shown as its deletion diff over empty content, but only if its last version passes the
+// same size and text checks as any other shown file.
+async function loadCommitFileView(
+  cwd: string,
+  hash: string,
+  entry: GitStatusEntry,
+  readWorkingTreeFile: () => Promise<string>,
+): Promise<CommitFileView> {
+  const deleted = entry.status === 'D'
+  const [diff, content] = await Promise.all([
+    fetchFileDiff(cwd, hash, entry.file, entry),
+    showFileAt(cwd, deleted ? `${hash}~1` : hash, entry.file),
+  ])
+  if (content === undefined) return { content: await readWorkingTreeFile(), fileDiff: '', diff }
+  if (content === null) return { content: UNREADABLE_FILE, fileDiff: '', diff }
+  if (!deleted) return { content, fileDiff: diff, diff }
+  if (buildInlineFileRows('', diff)?.length) return { content: '', fileDiff: diff, diff }
+  return { content, fileDiff: '', diff }
+}
+
 function FileContentView({ content, rows, focus }: { content: string; rows: DiffRow[] | null; focus: ChangeFocus | null }) {
   const plainLines = useMemo(() => rows ? [] : splitContentLines(content), [rows, content])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -228,6 +296,107 @@ function FileContentView({ content, rows, focus }: { content: string; rows: Diff
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+function CommitDetailsFields({ entry, loadedHashes, onJump }: {
+  entry: CommitDetailsEntry | undefined
+  loadedHashes: ReadonlySet<string>
+  onJump: (hash: string) => void
+}) {
+  const { t } = useTranslation()
+  if (entry === undefined || entry === 'loading') {
+    return <div className="git-commit-details-status">{t('common.loading')}</div>
+  }
+  if (entry === null) {
+    return <div className="git-commit-details-status">{t('git.detailsUnavailable')}</div>
+  }
+  const author = `${entry.authorName} <${entry.authorEmail}>`
+  const committer = `${entry.committerName} <${entry.committerEmail}>`
+  return (
+    <>
+      <dl className="git-commit-details-fields">
+        <dt>{t('git.detailsCommit')}</dt>
+        <dd className="git-commit-details-hash" title={entry.hash}>{entry.hash}</dd>
+        {entry.parents.length > 0 && (
+          <>
+            <dt>{t('git.detailsParents')}</dt>
+            <dd>
+              {parentLinks(entry.parents, loadedHashes).map(parent => parent.loaded ? (
+                <button
+                  key={parent.hash}
+                  type="button"
+                  className="git-commit-parent-link"
+                  title={parent.hash}
+                  onClick={() => onJump(parent.hash)}
+                >
+                  {parent.shortHash}
+                </button>
+              ) : (
+                <span key={parent.hash} className="git-commit-parent-hash" title={t('git.parentNotLoaded', { hash: parent.hash })}>
+                  {parent.shortHash}
+                </span>
+              ))}
+            </dd>
+          </>
+        )}
+        <dt>{t('git.detailsAuthor')}</dt>
+        <dd title={author}>{author}</dd>
+        <dt>{t('git.detailsDate')}</dt>
+        <dd>{formatCommitDateTime(entry.authorDate)}</dd>
+        {committerDiffersFromAuthor(entry) && (
+          <>
+            <dt>{t('git.detailsCommitter')}</dt>
+            <dd title={committer}>{committer}</dd>
+            <dt>{t('git.detailsDate')}</dt>
+            <dd>{formatCommitDateTime(entry.committerDate)}</dd>
+          </>
+        )}
+      </dl>
+      <div className="git-commit-details-message">{entry.message}</div>
+    </>
+  )
+}
+
+function ChangedFileList({ files, loading, selectedFile, onSelect }: {
+  files: readonly GitStatusEntry[]
+  loading: boolean
+  selectedFile: string | null
+  onSelect: (file: string) => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className="git-commit-details-files">
+      <div className="git-commit-details-files-header">
+        <span>{t('git.files')}</span>
+        {files.length > 0 && <span className="git-file-count">{files.length}</span>}
+      </div>
+      {loading && <div className="git-col-placeholder">{t('common.loading')}</div>}
+      {!loading && files.length === 0 && <div className="git-col-placeholder">{t('git.noChangedFiles')}</div>}
+      {files.map(f => (
+        <div
+          key={f.file}
+          className={`git-file-item ${selectedFile === f.file ? 'active' : ''}`}
+          onClick={() => onSelect(f.file)}
+        >
+          <span className="git-file-status" style={{ color: statusColor(f.status) }}>
+            {f.status}
+          </span>
+          <span className="git-file-name" title={f.file}>
+            {f.file.split('/').pop()}
+          </span>
+          {f.oldFile ? (
+            <span className="git-file-path" title={`${f.oldFile} → ${f.file}`}>
+              {`${f.oldFile} → ${f.file}`}
+            </span>
+          ) : (
+            <span className="git-file-path" title={f.file}>
+              {f.file.includes('/') ? f.file.substring(0, f.file.lastIndexOf('/') + 1) : ''}
+            </span>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -270,9 +439,18 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const loadRequestRef = useRef(0)
   const graphRequestRef = useRef(0)
   const selectedCommitRef = useRef<string | null>(null)
+  // Bumped per selection so a slower, superseded file-list, diff or file load is dropped.
+  const commitRequestRef = useRef(0)
+  const fileRequestRef = useRef(0)
   const columnsRef = useRef<HTMLDivElement>(null)
-  const commitPane = useResizablePaneWidth(columnsRef, 'better-terminal-git-commit-width', 28, 10, 50)
-  const filePane = useResizablePaneWidth(columnsRef, 'better-terminal-git-file-width', 22, 10, 40)
+  const commitListRef = useRef<HTMLDivElement>(null)
+  const commitPane = useResizablePaneWidth(columnsRef, 'better-terminal-git-commit-width', 40, 15, 70)
+  const activePathRef = useRef(activePath)
+  const [, refreshCommitDetails] = useReducer((tick: number) => tick + 1, 0)
+  const [commitDetails] = useState(() => new CommitDetailsCache(
+    hash => host.git.getCommitDetails(activePathRef.current, hash),
+    refreshCommitDetails,
+  ))
   const fileRows = useMemo(() => fileContent === null ? null : buildInlineFileRows(fileContent, fileDiff), [fileContent, fileDiff])
   const changeStarts = useMemo(() => fileRows ? changeBlockStarts(fileRows) : [], [fileRows])
   const [changeNav, setChangeNav] = useState<{ rows: DiffRow[]; index: number; seq: number } | null>(null)
@@ -301,15 +479,30 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     selectedCommitRef.current = selectedCommit
   }, [selectedCommit])
 
-  const clearSelectionMissingFrom = useCallback((listed: readonly { hash: string }[]) => {
-    const selected = selectedCommitRef.current
-    if (!selected || selected === 'working' || listed.some(commit => commit.hash === selected)) return
+  useEffect(() => {
+    activePathRef.current = activePath
+    commitDetails.reset()
+  }, [activePath, commitDetails])
+
+  const collapseCommit = useCallback(() => {
+    commitRequestRef.current++
+    fileRequestRef.current++
     setSelectedCommit(null)
     setChangedFiles([])
+    setFilesLoading(false)
+    setDiffLoading(false)
     setSelectedFile(null)
+    setFileContent(null)
+    setViewMode('diff')
     setDiff('')
     setFileDiff('')
   }, [])
+
+  const clearSelectionMissingFrom = useCallback((listed: readonly { hash: string }[]) => {
+    const selected = selectedCommitRef.current
+    if (!selected || selected === 'working' || listed.some(commit => commit.hash === selected)) return
+    collapseCommit()
+  }, [collapseCommit])
 
   const applyGraph = useCallback((result: GraphLogResult | null) => {
     setGraph(result)
@@ -328,11 +521,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     }
     setLoading(true)
     setGraphBusy(false)
-    setSelectedCommit(null)
-    setChangedFiles([])
-    setSelectedFile(null)
-    setDiff('')
-    setFileDiff('')
+    collapseCommit()
     const graphRequest = graphEnabledRef.current
       ? graphLogSource.load(activePath, graphScopeRef.current, graphCountRef.current)
       : Promise.resolve(null)
@@ -359,7 +548,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     if (early !== GRAPH_PENDING) return
     const result = await graphRequest
     if (loadId === loadRequestRef.current && graphId === graphRequestRef.current) applyGraph(result)
-  }, [activePath, applyGraph])
+  }, [activePath, applyGraph, collapseCommit])
 
   useEffect(() => {
     loadData()
@@ -426,42 +615,97 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
   const canLoadMoreCommits = graph !== null && graph.commits.length >= graphCount && graphCount < GRAPH_MAX_COUNT
 
   const handleSelectCommit = useCallback(async (hash: string) => {
+    const request = ++commitRequestRef.current
+    fileRequestRef.current++
     setSelectedCommit(hash)
     setSelectedFile(null)
+    setChangedFiles([])
+    setFileContent(null)
+    setViewMode('diff')
     setDiff('')
     setFileDiff('')
+    setDiffLoading(false)
     setFilesLoading(true)
+    if (hash !== UNCOMMITTED_ROW_HASH) void commitDetails.request(hash)
     try {
-      if (hash === 'working') {
+      if (hash === UNCOMMITTED_ROW_HASH) {
         setChangedFiles(status)
       } else {
         const files = await host.git.getDiffFiles(activePath, hash)
+        if (request !== commitRequestRef.current) return
         setChangedFiles(files)
       }
     } catch {
+      if (request !== commitRequestRef.current) return
       setChangedFiles([])
     }
     setFilesLoading(false)
-  }, [activePath, status])
+  }, [activePath, status, commitDetails])
+
+  const handleToggleCommit = useCallback((hash: string) => {
+    if (nextExpandedCommit(selectedCommit, hash) === null) collapseCommit()
+    else void handleSelectCommit(hash)
+  }, [selectedCommit, collapseCommit, handleSelectCommit])
+
+  const loadedCommitHashes = useMemo(
+    () => new Set((graph ? graph.commits : commits).map(commit => commit.hash)),
+    [graph, commits],
+  )
+
+  const handleJumpToCommit = useCallback((hash: string) => {
+    if (selectedCommit !== hash) void handleSelectCommit(hash)
+    requestAnimationFrame(() => {
+      const row = commitListRef.current?.querySelector<HTMLElement>(`[data-commit-hash="${hash}"]`)
+      row?.scrollIntoView({ block: 'nearest' })
+      row?.focus({ preventScroll: true })
+    })
+  }, [selectedCommit, handleSelectCommit])
+
+  const commitRowProps = (hash: string) => ({
+    role: 'button',
+    tabIndex: 0,
+    'aria-expanded': selectedCommit === hash,
+    'data-commit-hash': hash,
+    onClick: () => handleToggleCommit(hash),
+    onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+      event.preventDefault()
+      handleToggleCommit(hash)
+    },
+  })
+
+  const renderCommitExpansion = (hash: string, row: GraphRowLayout | undefined) => (
+    <div className={`git-commit-details${row ? ' git-commit-details-graph' : ''}`}>
+      {row && graphLayout && <GitGraphContinuation row={row} laneCount={graphLayout.laneCount} />}
+      {hash !== UNCOMMITTED_ROW_HASH && (
+        <CommitDetailsFields entry={commitDetails.get(hash)} loadedHashes={loadedCommitHashes} onJump={handleJumpToCommit} />
+      )}
+      <ChangedFileList files={changedFiles} loading={filesLoading} selectedFile={selectedFile} onSelect={handleSelectFile} />
+    </div>
+  )
 
   const handleSelectFile = useCallback(async (filePath: string) => {
+    const request = ++fileRequestRef.current
     setSelectedFile(filePath)
     setViewMode('diff')
+    setDiff('')
     setFileContent(null)
     setFileDiff('')
     setDiffLoading(true)
+    const fileEntry = changedFiles.find(f => f.file === filePath)
     try {
-      const d = await host.git.getDiff(activePath, selectedCommit || undefined, filePath)
+      const d = await fetchFileDiff(activePath, selectedCommit || undefined, filePath, fileEntry)
+      if (request !== fileRequestRef.current) return
       if (d.trim()) {
         setDiff(d)
       } else {
         // For untracked/new files, git diff returns empty - read file content directly
-        const fileEntry = changedFiles.find(f => f.file === filePath)
         if (fileEntry && (fileEntry.status === '??' || fileEntry.status === 'A')) {
           const base = gitRoot || activePath
           const sep = host.platform === 'win32' ? '\\' : '/'
           const fullPath = base + sep + filePath.replace(/[/\\]/g, sep)
           const result = await host.fs.readFile(fullPath)
+          if (request !== fileRequestRef.current) return
           if (result.content) {
             setDiff(newFileDiff(filePath, result.content))
           } else {
@@ -472,6 +716,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
         }
       }
     } catch {
+      if (request !== fileRequestRef.current) return
       setDiff('')
     }
     setDiffLoading(false)
@@ -479,6 +724,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
 
   const handleViewFile = useCallback(async () => {
     if (!selectedFile) return
+    const request = ++fileRequestRef.current
     setViewMode('file')
     setDiffLoading(true)
     setFileContent(null)
@@ -486,22 +732,42 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
     const base = gitRoot || activePath
     const sep = host.platform === 'win32' ? '\\' : '/'
     const fullPath = base + sep + selectedFile.replace(/[/\\]/g, sep)
+    const fileEntry = changedFiles.find(file => file.file === selectedFile)
     try {
-      const result = await host.fs.readFile(fullPath)
-      if (selectedCommit === 'working' && result.content !== undefined) {
-        const latestDiff = await host.git.getDiff(activePath, selectedCommit, selectedFile)
-        const recheck = await host.fs.readFile(fullPath)
-        const fileEntry = changedFiles.find(file => file.file === selectedFile)
-        const currentDiff = latestDiff.trim() ? latestDiff : fileEntry && (fileEntry.status === '??' || fileEntry.status === 'A') && recheck.content !== undefined
-          ? newFileDiff(selectedFile, recheck.content) : ''
-        setDiff(currentDiff)
-        setFileDiff(result.content === recheck.content ? currentDiff : '')
-        setFileContent(recheck.content ?? recheck.error ?? 'Unable to read file')
+      if (selectedCommit && selectedCommit !== 'working') {
+        const readWorkingTreeFile = async () => {
+          const result = await host.fs.readFile(fullPath)
+          return result.content ?? result.error ?? UNREADABLE_FILE
+        }
+        const view = await loadCommitFileView(activePath, selectedCommit, fileEntry ?? { status: '', file: selectedFile }, readWorkingTreeFile)
+        if (request !== fileRequestRef.current) return
+        setDiff(view.diff)
+        setFileDiff(view.fileDiff)
+        setFileContent(view.content)
       } else {
-        setFileContent(result.content ?? result.error ?? 'Unable to read file')
+        const result = await host.fs.readFile(fullPath)
+        if (selectedCommit === 'working' && result.content === undefined) {
+          const latestDiff = await fetchFileDiff(activePath, selectedCommit, selectedFile, fileEntry)
+          if (request !== fileRequestRef.current) return
+          setDiff(latestDiff)
+          setFileContent(result.error ?? UNREADABLE_FILE)
+        } else if (selectedCommit === 'working' && result.content !== undefined) {
+          const latestDiff = await fetchFileDiff(activePath, selectedCommit, selectedFile, fileEntry)
+          const recheck = await host.fs.readFile(fullPath)
+          if (request !== fileRequestRef.current) return
+          const currentDiff = latestDiff.trim() ? latestDiff : fileEntry && (fileEntry.status === '??' || fileEntry.status === 'A') && recheck.content !== undefined
+            ? newFileDiff(selectedFile, recheck.content) : ''
+          setDiff(currentDiff)
+          setFileDiff(result.content === recheck.content ? currentDiff : '')
+          setFileContent(recheck.content ?? recheck.error ?? UNREADABLE_FILE)
+        } else {
+          if (request !== fileRequestRef.current) return
+          setFileContent(result.content ?? result.error ?? UNREADABLE_FILE)
+        }
       }
     } catch {
-      setFileContent('Unable to read file')
+      if (request !== fileRequestRef.current) return
+      setFileContent(UNREADABLE_FILE)
       setDiff('')
     }
     setDiffLoading(false)
@@ -573,43 +839,49 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
           )}
         </div>
         <div
+          ref={commitListRef}
           className={`git-commit-list-items${graphLayout ? ' git-graph-list' : ''}`}
           style={graphLayout ? graphWidthStyle(graphLayout.laneCount) : undefined}
         >
           {status.length > 0 && (
-            <div
-              className={`git-commit-item${graphLayout ? ' git-commit-item-graph' : ''} ${selectedCommit === 'working' ? 'active' : ''}`}
-              onClick={() => handleSelectCommit('working')}
-            >
-              {graphLayout && <GitGraphCell row={graphLayout.rows[0]} laneCount={graphLayout.laneCount} />}
-              <div className="git-commit-message">
-                {!graphLayout && <span className="git-uncommitted-badge">●</span>}
-                {t('git.uncommittedChanges')}
+            <>
+              <div
+                className={`git-commit-item${graphLayout ? ' git-commit-item-graph' : ''} ${selectedCommit === UNCOMMITTED_ROW_HASH ? 'active' : ''}`}
+                {...commitRowProps(UNCOMMITTED_ROW_HASH)}
+              >
+                {graphLayout && <GitGraphCell row={graphLayout.rows[0]} laneCount={graphLayout.laneCount} />}
+                <div className="git-commit-message">
+                  {!graphLayout && <span className="git-uncommitted-badge">●</span>}
+                  {t('git.uncommittedChanges')}
+                </div>
+                <div className="git-commit-meta">
+                  {t('git.filesChanged', { count: status.length })}
+                </div>
               </div>
-              <div className="git-commit-meta">
-                {t('git.filesChanged', { count: status.length })}
-              </div>
-            </div>
+              {selectedCommit === UNCOMMITTED_ROW_HASH && renderCommitExpansion(UNCOMMITTED_ROW_HASH, graphLayout?.rows[0])}
+            </>
           )}
           {graph && graphLayout && graph.commits.map((commit, index) => {
             const row = graphLayout.rows[index + graphRowOffset]
             return (
-              <div
-                key={commit.hash}
-                className={`git-commit-item git-commit-item-graph ${selectedCommit === commit.hash ? 'active' : ''}`}
-                onClick={() => handleSelectCommit(commit.hash)}
-              >
-                <GitGraphCell row={row} laneCount={graphLayout.laneCount} />
-                <div className="git-commit-message">
-                  <GitRefBadges refs={commit.refs} color={row.color} />
-                  {commit.message}
+              <Fragment key={commit.hash}>
+                <div
+                  className={`git-commit-item git-commit-item-graph ${selectedCommit === commit.hash ? 'active' : ''}`}
+                  {...commitRowProps(commit.hash)}
+                >
+                  <GitGraphCell row={row} laneCount={graphLayout.laneCount} />
+                  <div className="git-commit-message">
+                    <GitRefBadges refs={commit.refs} color={row.color} />
+                    {commit.message}
+                  </div>
+                  <div className="git-commit-meta">
+                    <span className="git-commit-hash">{commit.hash.substring(0, 7)}</span>
+                    <span className="git-commit-author">{commit.author}</span>
+                    <span className="git-commit-date">{formatDate(commit.date)}</span>
+                  </div>
                 </div>
-                <div className="git-commit-meta">
-                  <span className="git-commit-hash">{commit.hash.substring(0, 7)}</span>
-                  <span className="git-commit-author">{commit.author}</span>
-                  <span className="git-commit-date">{formatDate(commit.date)}</span>
-                </div>
-              </div>
+                {selectedCommit === commit.hash && renderCommitExpansion(commit.hash, row)}
+              </Fragment>
             )
           })}
           {canLoadMoreCommits && (
@@ -618,18 +890,20 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
             </button>
           )}
           {!graph && commits.map(commit => (
-            <div
-              key={commit.hash}
-              className={`git-commit-item ${selectedCommit === commit.hash ? 'active' : ''}`}
-              onClick={() => handleSelectCommit(commit.hash)}
-            >
-              <div className="git-commit-message">{commit.message}</div>
-              <div className="git-commit-meta">
-                <span className="git-commit-hash">{commit.hash.substring(0, 7)}</span>
-                <span className="git-commit-author">{commit.author}</span>
-                <span className="git-commit-date">{formatDate(commit.date)}</span>
+            <Fragment key={commit.hash}>
+              <div
+                className={`git-commit-item ${selectedCommit === commit.hash ? 'active' : ''}`}
+                {...commitRowProps(commit.hash)}
+              >
+                <div className="git-commit-message">{commit.message}</div>
+                <div className="git-commit-meta">
+                  <span className="git-commit-hash">{commit.hash.substring(0, 7)}</span>
+                  <span className="git-commit-author">{commit.author}</span>
+                  <span className="git-commit-date">{formatDate(commit.date)}</span>
+                </div>
               </div>
-            </div>
+              {selectedCommit === commit.hash && renderCommitExpansion(commit.hash, undefined)}
+            </Fragment>
           ))}
           {commits.length === 0 && status.length === 0 && (
             <div className="git-panel-empty">{t('git.noCommitsYet')}</div>
@@ -639,47 +913,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
 
       <ResizeHandle direction="horizontal" onResize={commitPane.resize} onDoubleClick={commitPane.reset} />
 
-      {/* Column 2: Changed files */}
-      <div className="git-file-list" style={filePane.style}>
-        <div className="git-col-header">
-          <span>{t('git.files')}</span>
-          {changedFiles.length > 0 && (
-            <span className="git-file-count">{changedFiles.length}</span>
-          )}
-        </div>
-        <div className="git-file-list-items">
-          {!selectedCommit && (
-            <div className="git-col-placeholder">{t('git.selectACommit')}</div>
-          )}
-          {selectedCommit && filesLoading && (
-            <div className="git-col-placeholder">{t('common.loading')}</div>
-          )}
-          {selectedCommit && !filesLoading && changedFiles.length === 0 && (
-            <div className="git-col-placeholder">{t('git.noChangedFiles')}</div>
-          )}
-          {changedFiles.map(f => (
-            <div
-              key={f.file}
-              className={`git-file-item ${selectedFile === f.file ? 'active' : ''}`}
-              onClick={() => handleSelectFile(f.file)}
-            >
-              <span className="git-file-status" style={{ color: statusColor(f.status) }}>
-                {f.status}
-              </span>
-              <span className="git-file-name" title={f.file}>
-                {f.file.split('/').pop()}
-              </span>
-              <span className="git-file-path" title={f.file}>
-                {f.file.includes('/') ? f.file.substring(0, f.file.lastIndexOf('/') + 1) : ''}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <ResizeHandle direction="horizontal" onResize={filePane.resize} onDoubleClick={filePane.reset} />
-
-      {/* Column 3: Diff / File preview */}
+      {/* Column 2: Diff / File preview */}
       <div className="git-diff-view">
         {selectedFile && isTextFile(selectedFile.split('/').pop() || '') && (
           <div className="git-diff-mode-bar">

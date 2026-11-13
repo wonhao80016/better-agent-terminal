@@ -122,6 +122,23 @@ export function computeGitGraph(rows: readonly GraphInputRow[]): GraphLayout {
   return { rows: layout, laneCount }
 }
 
+export interface GraphContinuation {
+  lane: number
+  color: number
+  dashed: boolean
+}
+
+/** Lanes that leave the bottom of `row`, drawn straight through content inserted below it. */
+export function graphContinuations(row: GraphRowLayout): GraphContinuation[] {
+  const byLane = new Map<number, GraphContinuation>()
+  for (const line of row.lines) {
+    if (line.to === 'bottom' && !byLane.has(line.toLane)) {
+      byLane.set(line.toLane, { lane: line.toLane, color: line.color, dashed: line.dashed })
+    }
+  }
+  return [...byLane.values()].sort((a, b) => a.lane - b.lane)
+}
+
 export function parseGraphScope(value: unknown): GitGraphScope {
   return value === 'all' ? 'all' : 'current'
 }

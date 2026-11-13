@@ -141,8 +141,12 @@ async function run() {
         }] as unknown as T
       }
       if (cmd === 'git_get_diff') return 'diff --git a/x b/x\n' as unknown as T
+      if (cmd === 'git_show_file') return 'line 1\n' as unknown as T
+      if (cmd === 'git_get_commit_details') {
+        return { hash: 'h1', parents: ['h0'], authorName: 'a', authorEmail: 'a@x', authorDate: 'd', committerName: 'a', committerEmail: 'a@x', committerDate: 'd', message: 'm\n\nbody' } as unknown as T
+      }
       if (cmd === 'git_get_diff_files') {
-        return [{ status: 'M', file: 'a.ts' }] as unknown as T
+        return [{ status: 'M', file: 'a.ts' }, { status: 'R098', file: 'b.ts', oldFile: 'a0.ts' }] as unknown as T
       }
       if (cmd === 'git_get_root') return '/repo' as unknown as T
       if (cmd === 'git_get_status') {
@@ -472,8 +476,13 @@ async function run() {
     assert.equal(diff, 'diff --git a/x b/x\n')
     // commit + filePath both optional
     await mod.host.git.getDiff('/repo')
+    await mod.host.git.getDiff('/repo', 'abc', 'b.ts', 'a0.ts')
+    assert.equal(await mod.host.git.showFile('/repo', 'abc~1', 'src/a.ts'), 'line 1\n')
+    const details = await mod.host.git.getCommitDetails('/repo', 'h1')
+    assert.equal(details?.message, 'm\n\nbody')
+    assert.deepEqual(details?.parents, ['h0'])
     const diffFiles = await mod.host.git.getDiffFiles('/repo', 'abc')
-    assert.deepEqual(diffFiles, [{ status: 'M', file: 'a.ts' }])
+    assert.deepEqual(diffFiles, [{ status: 'M', file: 'a.ts' }, { status: 'R098', file: 'b.ts', oldFile: 'a0.ts' }])
     await mod.host.git.getDiffFiles('/repo')
     const root = await mod.host.git.getRoot('/repo')
     assert.equal(root, '/repo')
@@ -884,8 +893,11 @@ async function run() {
       { cmd: 'git_get_log', args: { cwd: '/repo', count: undefined } },
       { cmd: 'git_get_graph_log', args: { cwd: '/repo', count: 150, scope: 'all' } },
       { cmd: 'git_get_graph_log', args: { cwd: '/repo', count: undefined, scope: undefined } },
-      { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: 'abc', filePath: 'a.ts' } },
-      { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: undefined, filePath: undefined } },
+      { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: 'abc', filePath: 'a.ts', oldFilePath: undefined } },
+      { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: undefined, filePath: undefined, oldFilePath: undefined } },
+      { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: 'abc', filePath: 'b.ts', oldFilePath: 'a0.ts' } },
+      { cmd: 'git_show_file', args: { cwd: '/repo', rev: 'abc~1', filePath: 'src/a.ts' } },
+      { cmd: 'git_get_commit_details', args: { cwd: '/repo', commitHash: 'h1' } },
       { cmd: 'git_get_diff_files', args: { cwd: '/repo', commitHash: 'abc' } },
       { cmd: 'git_get_diff_files', args: { cwd: '/repo', commitHash: undefined } },
       { cmd: 'git_get_root', args: { cwd: '/repo' } },

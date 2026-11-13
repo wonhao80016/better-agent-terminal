@@ -298,6 +298,8 @@ renderer 的取得規則（`fetchGraph`，不會 reject）：
 | D5 | 「全部分支」是否包含遠端分支與 tag | 包含，與附圖一致 |
 | D6 | 逾時只結束 wrapper、卡住的 git 永遠殘留：是否清除現有孤兒、修正、追查原因 | 三項都做：清除本機的孤兒；以 `ProcessTree`（Job Object）修正所有 git runner（P7）；原因見 11.4 |
 | D7 | 讀分支造成的行程數量，以及它逾時讓 Git 頁面誤判「Not a git repository」（11.5） | 讀分支改為直接讀 repo 檔案、必要時才退回 git（P8）；「Not a git repository」畫面加重新整理按鈕（P9） |
+| D8（2026-11-13） | 歷史 commit 的 File 檢視沒有變更標示、改名檔案（`R<相似度>`）看不到 diff | File 檢視改讀該 commit 的檔案內容（`git cat-file blob <hash>:<path>`，新指令 `git_show_file`／遠端 `git:show-file`），並套用與 Diff 分頁相同的 diff；刪除的檔案顯示刪除前內容、整份標為刪除；改名與複製拆成新舊路徑，以 blob 對 blob 的 `git diff <hash>~1:<舊> <hash>:<新>` 取 diff（不混入舊路徑本身的修改），清單顯示「舊路徑 → 新路徑」；遠端 host 沒有 `git:show-file` 時改讀工作目錄檔案、不加標示。檔案清單與未提交變更改用 `-z` 輸出解析，非 ASCII 與特殊字元路徑不再被 C-quote 破壞，暫存的改名也拆成新舊路徑；diff 的 pathspec 一律用 `:(top,literal)<path>`，workspace 位於 repo 子目錄時仍正確，且 `*`、`?`、`[` 不會被當成萬用字元 |
+| D9（2026-11-13） | commit 列改成手風琴展開，並移除中間的檔案欄 | Git 頁面改為兩欄（commit 清單＋Diff/File）；點 commit 列在其下方展開明細，一次只展開一列、再點一次收合；明細依序為完整 hash、parents（可點擊跳到該 commit 並展開，不在目前載入清單內的 parent 顯示為不可點擊）、Author／Date、與 Author 不同時才顯示的 Committer／Date、完整訊息，最後是變更檔案清單；Uncommitted 列只顯示變更檔案清單。明細由新指令 `git_get_commit_details`／遠端 `git:commit-details` 依需求取得（`git log -1 --format` 以 NUL 分隔欄位），每個 hash 在本次面板期間快取；展開區塊中 graph 車道繼續往下延伸 |
 
 已自行決定的實作參數：「載入更多」初始 50、每次 +100、最多 500；初次顯示等待 graph 的上限 300 ms（理由見 5.6）。
 

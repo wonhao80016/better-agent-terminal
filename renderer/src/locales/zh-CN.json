@@ -540,6 +540,13 @@
   },
   "git": {
     "commits": "提交记录",
+    "detailsCommit": "提交",
+    "detailsParents": "父提交",
+    "detailsAuthor": "作者",
+    "detailsCommitter": "提交者",
+    "detailsDate": "日期",
+    "detailsUnavailable": "无法获取提交详细信息。",
+    "parentNotLoaded": "{{hash}} 不在当前加载的列表中",
     "refresh": "刷新",
     "uncommittedChanges": "未提交的变更",
     "filesChanged": "{{count}} 个文件已变更",

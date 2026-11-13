@@ -12,7 +12,7 @@ use std::sync::{
 };
 use std::time::Duration;
 pub type FsEventSink = Arc<dyn Fn(&str, &Value) + Send + Sync + 'static>;
-const MAX_READ_BYTES: u64 = 512 * 1024;
+pub const MAX_READ_BYTES: u64 = 512 * 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 const MAX_FS_WATCHERS: usize = 64;
 const RESOLVE_PATH_LINK_LIMIT: usize = 200;
