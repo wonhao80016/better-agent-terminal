@@ -14,6 +14,7 @@ import { CLAUDE_BUILTIN_MODELS } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
 import { normalizeSessionHistoryMaxLineMiB, SESSION_HISTORY_MIN_MAX_LINE_MIB, SESSION_HISTORY_MAX_MAX_LINE_MIB } from '../utils/session-history-actions'
 import { LoginDialog } from './LoginDialog'
+import { formatAuthErrorMessage } from '../utils/error-message'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -290,7 +291,7 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
         setSwitchWarningShown(result.switchWarningShown)
       }
     } catch (e) {
-      host.debug.log?.(`[SettingsPanel] Failed to load accounts: ${e}`)
+      host.debug.log?.(`[SettingsPanel] Failed to load accounts: ${formatAuthErrorMessage(e, 'Unknown account error')}`)
     }
     setAccountsLoading(false)
   }, [])
