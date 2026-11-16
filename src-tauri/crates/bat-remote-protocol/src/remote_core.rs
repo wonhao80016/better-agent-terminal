@@ -519,6 +519,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "git:diff" => Some(&["cwd", "commitHash", "filePath", "oldFilePath"]),
         "git:show-file" => Some(&["cwd", "rev", "filePath"]),
         "git:commit-details" => Some(&["cwd", "commitHash"]),
+        "git:worktree-file" => Some(&["cwd", "filePath"]),
         "git:diff-files" => Some(&["cwd", "commitHash"]),
         "fs:readdir" | "fs:isDirectory" | "fs:search" | "fs:watch" | "fs:unwatch"
         | "fs:list-dirs" => match channel {
@@ -994,6 +995,10 @@ mod tests {
         assert_eq!(
             legacy_v1_args_to_params("git:commit-details", &[json!("/repo"), json!("abc123")]),
             json!({ "cwd": "/repo", "commitHash": "abc123" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("git:worktree-file", &[json!("/repo"), json!("a b/x.inf")]),
+            json!({ "cwd": "/repo", "filePath": "a b/x.inf" })
         );
     }
 

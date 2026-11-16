@@ -142,6 +142,7 @@ async function run() {
       }
       if (cmd === 'git_get_diff') return 'diff --git a/x b/x\n' as unknown as T
       if (cmd === 'git_show_file') return 'line 1\n' as unknown as T
+      if (cmd === 'git_read_worktree_file') return 'worktree\n' as unknown as T
       if (cmd === 'git_get_commit_details') {
         return { hash: 'h1', parents: ['h0'], authorName: 'a', authorEmail: 'a@x', authorDate: 'd', committerName: 'a', committerEmail: 'a@x', committerDate: 'd', message: 'm\n\nbody' } as unknown as T
       }
@@ -478,6 +479,7 @@ async function run() {
     await mod.host.git.getDiff('/repo')
     await mod.host.git.getDiff('/repo', 'abc', 'b.ts', 'a0.ts')
     assert.equal(await mod.host.git.showFile('/repo', 'abc~1', 'src/a.ts'), 'line 1\n')
+    assert.equal(await mod.host.git.readWorktreeFile('/repo', 'src/a.inf'), 'worktree\n')
     const details = await mod.host.git.getCommitDetails('/repo', 'h1')
     assert.equal(details?.message, 'm\n\nbody')
     assert.deepEqual(details?.parents, ['h0'])
@@ -897,6 +899,7 @@ async function run() {
       { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: undefined, filePath: undefined, oldFilePath: undefined } },
       { cmd: 'git_get_diff', args: { cwd: '/repo', commitHash: 'abc', filePath: 'b.ts', oldFilePath: 'a0.ts' } },
       { cmd: 'git_show_file', args: { cwd: '/repo', rev: 'abc~1', filePath: 'src/a.ts' } },
+      { cmd: 'git_read_worktree_file', args: { cwd: '/repo', filePath: 'src/a.inf' } },
       { cmd: 'git_get_commit_details', args: { cwd: '/repo', commitHash: 'h1' } },
       { cmd: 'git_get_diff_files', args: { cwd: '/repo', commitHash: 'abc' } },
       { cmd: 'git_get_diff_files', args: { cwd: '/repo', commitHash: undefined } },

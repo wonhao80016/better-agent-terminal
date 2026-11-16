@@ -392,8 +392,10 @@ name = "bat-git"
 version = "0.1.0"
 dependencies = [
  "bat-host-support",
+ "libc",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

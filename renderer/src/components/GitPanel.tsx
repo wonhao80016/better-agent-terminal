@@ -239,6 +239,16 @@ function showFileAt(cwd: string, rev: string, filePath: string): Promise<string 
   return host.git.showFile(cwd, rev, filePath).catch((error: unknown) => isMissingShowFileCommand(error) ? undefined : null)
 }
 
+type FileReadResult = Awaited<ReturnType<typeof host.fs.readFile>>
+
+// The plain file reader refuses UTF-16; the host's work-tree reader decodes it when it has a BOM.
+async function readWorkingTreeText(cwd: string, fullPath: string, filePath: string): Promise<FileReadResult> {
+  const result = await host.fs.readFile(fullPath)
+  if (result.content !== undefined) return result
+  const decoded = await host.git.readWorktreeFile(cwd, filePath).catch(() => null)
+  return typeof decoded === 'string' ? { ...result, content: decoded, error: undefined } : result
+}
+
 interface CommitFileView {
   content: string
   fileDiff: string
@@ -704,7 +714,7 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
           const base = gitRoot || activePath
           const sep = host.platform === 'win32' ? '\\' : '/'
           const fullPath = base + sep + filePath.replace(/[/\\]/g, sep)
-          const result = await host.fs.readFile(fullPath)
+          const result = await readWorkingTreeText(activePath, fullPath, filePath)
           if (request !== fileRequestRef.current) return
           if (result.content) {
             setDiff(newFileDiff(filePath, result.content))
@@ -745,15 +755,17 @@ export function GitPanel({ workspaceFolderPath, worktreePaths = [] }: Readonly<G
         setFileDiff(view.fileDiff)
         setFileContent(view.content)
       } else {
-        const result = await host.fs.readFile(fullPath)
-        if (selectedCommit === 'working' && result.content === undefined) {
+        const working = selectedCommit === UNCOMMITTED_ROW_HASH
+        const readFile = () => working ? readWorkingTreeText(activePath, fullPath, selectedFile) : host.fs.readFile(fullPath)
+        const result = await readFile()
+        if (working && result.content === undefined) {
           const latestDiff = await fetchFileDiff(activePath, selectedCommit, selectedFile, fileEntry)
           if (request !== fileRequestRef.current) return
           setDiff(latestDiff)
           setFileContent(result.error ?? UNREADABLE_FILE)
-        } else if (selectedCommit === 'working' && result.content !== undefined) {
+        } else if (working && result.content !== undefined) {
           const latestDiff = await fetchFileDiff(activePath, selectedCommit, selectedFile, fileEntry)
-          const recheck = await host.fs.readFile(fullPath)
+          const recheck = await readFile()
           if (request !== fileRequestRef.current) return
           const currentDiff = latestDiff.trim() ? latestDiff : fileEntry && (fileEntry.status === '??' || fileEntry.status === 'A') && recheck.content !== undefined
             ? newFileDiff(selectedFile, recheck.content) : ''

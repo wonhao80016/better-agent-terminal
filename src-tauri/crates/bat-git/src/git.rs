@@ -7,7 +7,7 @@ use std::time::Duration;
 
 // Hard upper bound for log/status/diff output. Mirrors the Electron
 // maxBuffer (5 MiB) so a runaway repo can't OOM the renderer.
-const MAX_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct GitLogEntry {
@@ -69,13 +69,27 @@ pub fn run_git(cwd: &str, args: &[&str], timeout: Duration) -> Option<String> {
 }
 
 // Raw stdout of `git`, or None on any failure or when it exceeds `max_bytes`.
-// stdout is drained on a reader thread so output beyond the pipe buffer cannot stall git.
 pub fn run_git_bytes(
     cwd: &str,
     args: &[&str],
     timeout: Duration,
     max_bytes: usize,
 ) -> Option<Vec<u8>> {
+    match run_git_output(cwd, args, timeout, max_bytes)? {
+        (Some(0), stdout) => Some(stdout),
+        _ => None,
+    }
+}
+
+// Exit code (None if killed by a signal) and stdout of `git`, for commands whose non-zero
+// exit is meaningful. None when git cannot run, times out, or stdout exceeds `max_bytes`.
+// stdout is drained on a reader thread so output beyond the pipe buffer cannot stall git.
+pub fn run_git_output(
+    cwd: &str,
+    args: &[&str],
+    timeout: Duration,
+    max_bytes: usize,
+) -> Option<(Option<i32>, Vec<u8>)> {
     if cwd.trim().is_empty() || !Path::new(cwd).is_dir() {
         return None;
     }
@@ -118,18 +132,132 @@ pub fn run_git_bytes(
     };
 
     let stdout = reader.join().ok()?.ok()?;
-    if !status.success() || stdout.len() > max_bytes {
+    if stdout.len() > max_bytes {
         return None;
     }
-    Some(stdout)
+    Some((status.code(), stdout))
 }
 
-// Text for display, or None when over `max_bytes`, binary (contains NUL), or not UTF-8.
-pub fn decode_text_blob(bytes: Vec<u8>, max_bytes: usize) -> Option<String> {
-    if bytes.len() > max_bytes || bytes.contains(&0) {
+const UTF16_LE_BOM: [u8; 2] = [0xFF, 0xFE];
+const UTF16_BE_BOM: [u8; 2] = [0xFE, 0xFF];
+
+pub fn has_utf16_bom(bytes: &[u8]) -> bool {
+    bytes.starts_with(&UTF16_LE_BOM) || bytes.starts_with(&UTF16_BE_BOM)
+}
+
+// Without the BOM; None for an odd byte count or an unpaired surrogate.
+fn decode_utf16_with_bom(bytes: &[u8]) -> Option<String> {
+    let little_endian = bytes.starts_with(&UTF16_LE_BOM);
+    let body = bytes.get(2..)?;
+    if body.len() % 2 != 0 {
         return None;
     }
-    String::from_utf8(bytes).ok()
+    let units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = [pair[0], pair[1]];
+            if little_endian {
+                u16::from_le_bytes(pair)
+            } else {
+                u16::from_be_bytes(pair)
+            }
+        })
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+// Text for display, or None when the raw bytes exceed `max_bytes`, the text is binary
+// (contains NUL), or it is neither UTF-8 nor UTF-16 with a BOM. BOM-less UTF-16 is not guessed.
+pub fn decode_text_blob(bytes: Vec<u8>, max_bytes: usize) -> Option<String> {
+    if bytes.len() > max_bytes {
+        return None;
+    }
+    let text = if has_utf16_bom(&bytes) {
+        decode_utf16_with_bom(&bytes)?
+    } else {
+        String::from_utf8(bytes).ok()?
+    };
+    if text.contains('\0') {
+        return None;
+    }
+    Some(text)
+}
+
+// True when git printed a binary notice instead of hunks for at least one file.
+pub fn is_binary_diff_output(raw: &str) -> bool {
+    raw.lines().any(|line| {
+        (line.starts_with("Binary files ") && line.ends_with(" differ")) || line == "GIT binary patch"
+    })
+}
+
+// Diff of two decoded files outside any repository, compared byte for byte: `--text`, and no
+// EOL conversion or attributes from user config (`empty_attributes` must name an empty file).
+pub fn build_no_index_diff_args(old_file: &str, new_file: &str, empty_attributes: &str) -> Vec<String> {
+    let attributes = format!("core.attributesFile={empty_attributes}");
+    [
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.eol=lf",
+        "-c",
+        "core.safecrlf=false",
+        "-c",
+        attributes.as_str(),
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--text",
+        "-U3",
+        "--",
+        old_file,
+        new_file,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+// Replaces the temp-file header of a `--no-index` diff with one for the repository paths;
+// None marks a side that does not exist (an added or deleted file).
+pub fn rewrite_no_index_diff(raw: &str, old_path: Option<&str>, new_path: Option<&str>) -> String {
+    let a = old_path.or(new_path).unwrap_or_default();
+    let b = new_path.or(old_path).unwrap_or_default();
+    let mut out = format!("diff --git a/{a} b/{b}\n");
+    if old_path.is_none() {
+        out.push_str("new file mode 100644\n");
+    }
+    if new_path.is_none() {
+        out.push_str("deleted file mode 100644\n");
+    }
+    match old_path {
+        Some(path) => out.push_str(&format!("--- a/{path}\n")),
+        None => out.push_str("--- /dev/null\n"),
+    }
+    match new_path {
+        Some(path) => out.push_str(&format!("+++ b/{path}\n")),
+        None => out.push_str("+++ /dev/null\n"),
+    }
+    let hunks = if raw.starts_with("@@ ") {
+        Some(0)
+    } else {
+        raw.find("\n@@ ").map(|index| index + 1)
+    };
+    if let Some(start) = hunks {
+        out.push_str(&raw[start..]);
+    }
+    out
+}
+
+// Lexical pre-check only: no NUL, absolute or drive path, `:` (drive or NTFS stream), `.` or `..`
+// component. Symlinks and junctions are handled on the canonical path by read_worktree_file.
+pub fn is_safe_worktree_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\0')
+        && !path.starts_with(['/', '\\'])
+        && !path.contains(':')
+        && path.split(['/', '\\']).all(|part| part != ".." && part != ".")
 }
 
 // `git remote get-url origin` returns the remote URL; we only
@@ -812,6 +940,151 @@ mod tests {
             build_show_file_args("abc123~1", "中文 dir/a\tb*.txt"),
             argv(&["cat-file", "blob", "abc123~1:中文 dir/a\tb*.txt"]),
         );
+    }
+
+    fn utf16(text: &str, little_endian: bool) -> Vec<u8> {
+        let mut bytes = if little_endian { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+        for unit in text.encode_utf16() {
+            let pair = if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() };
+            bytes.extend_from_slice(&pair);
+        }
+        bytes
+    }
+
+    #[test]
+    fn has_utf16_bom_detects_both_byte_orders_only() {
+        assert!(has_utf16_bom(&[0xFF, 0xFE, 0x3B, 0x00]));
+        assert!(has_utf16_bom(&[0xFE, 0xFF]));
+        assert!(!has_utf16_bom(&[0xEF, 0xBB, 0xBF, b'a']));
+        assert!(!has_utf16_bom(&[0x3B, 0x00, 0x41, 0x00]));
+        assert!(!has_utf16_bom(&[0xFF]));
+        assert!(!has_utf16_bom(&[]));
+    }
+
+    #[test]
+    fn decode_text_blob_decodes_utf16_le_and_be_without_the_bom() {
+        let text = "; INF 檔\r\nDriverVer=11/13/2026\r\n😀\r\n";
+        assert_eq!(decode_text_blob(utf16(text, true), 4096), Some(text.to_string()));
+        assert_eq!(decode_text_blob(utf16(text, false), 4096), Some(text.to_string()));
+    }
+
+    #[test]
+    fn decode_text_blob_utf16_edge_cases() {
+        assert_eq!(decode_text_blob(vec![0xFF, 0xFE], 64), Some(String::new()));
+        assert_eq!(decode_text_blob(vec![0xFE, 0xFF], 64), Some(String::new()));
+        assert_eq!(decode_text_blob(vec![0xFF, 0xFE, 0x41], 64), None);
+        assert_eq!(decode_text_blob(vec![0xFF, 0xFE, 0x00, 0xD8, 0x41, 0x00], 64), None);
+        assert_eq!(decode_text_blob(vec![0xFE, 0xFF, 0xDC, 0x00], 64), None);
+        assert_eq!(decode_text_blob(utf16("a\0b", true), 64), None);
+        assert_eq!(decode_text_blob(vec![0xFF, 0xFE, 0x00, 0x00, 0x41, 0x00], 64), None);
+    }
+
+    #[test]
+    fn decode_text_blob_caps_raw_utf16_bytes() {
+        let bytes = utf16("abcd", true);
+        assert_eq!(bytes.len(), 10);
+        assert_eq!(decode_text_blob(bytes.clone(), 10), Some("abcd".into()));
+        assert_eq!(decode_text_blob(bytes, 9), None);
+    }
+
+    #[test]
+    fn decode_text_blob_keeps_utf8_and_its_bom() {
+        assert_eq!(
+            decode_text_blob(vec![0xEF, 0xBB, 0xBF, b'a'], 64),
+            Some("\u{FEFF}a".into())
+        );
+        assert_eq!(decode_text_blob(b"plain".to_vec(), 64), Some("plain".into()));
+    }
+
+    #[test]
+    fn is_binary_diff_output_spots_binary_notices() {
+        assert!(is_binary_diff_output(
+            "diff --git a/x.inf b/x.inf\nindex 1..2 100644\nBinary files a/x.inf and b/x.inf differ\n"
+        ));
+        assert!(is_binary_diff_output("diff --git a/x b/x\nGIT binary patch\nliteral 3\n"));
+        assert!(!is_binary_diff_output("diff --git a/x b/x\n@@ -1 +1 @@\n-Binary files a and b differ\n+x\n"));
+        assert!(!is_binary_diff_output(""));
+    }
+
+    #[test]
+    fn build_no_index_diff_args_forces_text_without_drivers() {
+        assert_eq!(
+            Some(build_no_index_diff_args("C:\\t\\old.txt", "C:\\t\\new.txt", "C:\\t\\attributes")),
+            argv(&[
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
+                "-c",
+                "core.safecrlf=false",
+                "-c",
+                "core.attributesFile=C:\\t\\attributes",
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--text",
+                "-U3",
+                "--",
+                "C:\\t\\old.txt",
+                "C:\\t\\new.txt",
+            ]),
+        );
+    }
+
+    const NO_INDEX_RAW: &str = "diff --git a/C:/t/old.txt b/C:/t/new.txt\nindex 1234567..89abcde 100644\n--- a/C:/t/old.txt\n+++ b/C:/t/new.txt\n@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r\n";
+
+    #[test]
+    fn rewrite_no_index_diff_uses_repository_paths() {
+        assert_eq!(
+            rewrite_no_index_diff(NO_INDEX_RAW, Some("dir/x.inf"), Some("dir/x.inf")),
+            "diff --git a/dir/x.inf b/dir/x.inf\n--- a/dir/x.inf\n+++ b/dir/x.inf\n@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r\n"
+        );
+        assert_eq!(
+            rewrite_no_index_diff(NO_INDEX_RAW, Some("old/x.rc"), Some("new/y.rc")),
+            "diff --git a/old/x.rc b/new/y.rc\n--- a/old/x.rc\n+++ b/new/y.rc\n@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r\n"
+        );
+    }
+
+    #[test]
+    fn rewrite_no_index_diff_marks_added_and_deleted_files() {
+        let added = rewrite_no_index_diff("@@ -0,0 +1 @@\n+x\n", None, Some("新.inf"));
+        assert_eq!(added, "diff --git a/新.inf b/新.inf\nnew file mode 100644\n--- /dev/null\n+++ b/新.inf\n@@ -0,0 +1 @@\n+x\n");
+        let deleted = rewrite_no_index_diff("diff --git a/o b/n\n@@ -1 +0,0 @@\n-x\n", Some("old.inf"), None);
+        assert_eq!(deleted, "diff --git a/old.inf b/old.inf\ndeleted file mode 100644\n--- a/old.inf\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n");
+    }
+
+    #[test]
+    fn rewrite_no_index_diff_without_changes_keeps_only_the_header() {
+        assert_eq!(
+            rewrite_no_index_diff("", Some("a.inf"), Some("a.inf")),
+            "diff --git a/a.inf b/a.inf\n--- a/a.inf\n+++ b/a.inf\n"
+        );
+    }
+
+    #[test]
+    fn is_safe_worktree_path_stays_inside_the_work_tree() {
+        assert!(is_safe_worktree_path("ftWbioFpDriver/FocalFpDriverUmdf.inf"));
+        assert!(is_safe_worktree_path("中文 dir/a b.rc"));
+        assert!(!is_safe_worktree_path(""));
+        assert!(!is_safe_worktree_path("../secret.txt"));
+        assert!(!is_safe_worktree_path("a/../../b"));
+        assert!(!is_safe_worktree_path("a\\..\\b"));
+        assert!(!is_safe_worktree_path("/etc/passwd"));
+        assert!(!is_safe_worktree_path("\\\\server\\share\\x"));
+        assert!(!is_safe_worktree_path("C:/Windows/win.ini"));
+        assert!(!is_safe_worktree_path("a.txt:stream"));
+        assert!(!is_safe_worktree_path("a\0b"));
+    }
+
+    #[test]
+    fn run_git_output_reports_non_zero_exits() {
+        let cwd = env!("CARGO_MANIFEST_DIR");
+        let (code, _) = run_git_output(cwd, &["rev-parse", "--verify", "--quiet", "refs/heads/no-such-branch-xyz"], Duration::from_secs(30), 1024)
+            .expect("git runs");
+        assert_eq!(code, Some(1));
+        assert!(run_git_bytes(cwd, &["rev-parse", "--verify", "--quiet", "refs/heads/no-such-branch-xyz"], Duration::from_secs(30), 1024).is_none());
     }
 
     #[test]

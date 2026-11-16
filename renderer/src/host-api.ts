@@ -970,6 +970,10 @@ function createTauriHost(): BatAppAPI {
       // Rejects when a remote host cannot serve it (a host built before this command).
       showFile: (cwd: string, rev: string, filePath: string) =>
         getInvoke()<string | null>('git_show_file', { cwd, rev, filePath }),
+      // A work-tree file decoded like showFile (UTF-16 with a BOM included); null when it cannot
+      // be shown or the host predates this command.
+      readWorktreeFile: (cwd: string, filePath: string) =>
+        getInvoke()<string | null>('git_read_worktree_file', { cwd, filePath }),
       // null when the revision is invalid, git fails, or the host predates this command.
       getCommitDetails: (cwd: string, commitHash: string) =>
         getInvoke()<{

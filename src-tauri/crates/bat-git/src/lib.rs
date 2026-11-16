@@ -2,4 +2,5 @@
 
 pub mod git;
 pub mod head;
+pub mod text_diff;
 pub mod worktree;

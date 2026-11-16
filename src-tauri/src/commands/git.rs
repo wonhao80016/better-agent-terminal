@@ -16,7 +16,8 @@ use crate::commands::profile as profile_cmd;
 use crate::remote_client::RustRemoteClientState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
-use bat_git::git::{decode_text_blob, run_git, run_git_bytes};
+use bat_git::git::{decode_text_blob, is_binary_diff_output, run_git, run_git_bytes};
+use bat_git::text_diff::{decoded_text_diff, read_worktree_file};
 use bat_git::head::{lookup_head, HeadLookup};
 use std::path::Path;
 pub use bat_git::git::{
@@ -279,9 +280,65 @@ pub(crate) async fn git_get_diff_native(
     ) else {
         return String::new();
     };
-    run_git_blocking(cwd, argv, Duration::from_secs(10))
+    let raw = run_git_blocking(cwd.clone(), argv, Duration::from_secs(10))
         .await
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let Some(file) = file_path.filter(|path| !path.is_empty()) else {
+        return raw;
+    };
+    if !is_binary_diff_output(&raw) {
+        return raw;
+    }
+    crate::async_rt::spawn_blocking(move || {
+        decoded_text_diff(
+            &cwd,
+            commit_hash.as_deref(),
+            &file,
+            old_file_path.as_deref(),
+            bat_filesystem::MAX_READ_BYTES as usize,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(raw)
+}
+
+// A work-tree file decoded like git_show_file (UTF-16 with a BOM included), for the File view
+// of uncommitted changes. None when it cannot be shown or a remote host lacks the channel.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn git_read_worktree_file(
+    app: AppHandle,
+    window: WebviewWindow,
+    cwd: String,
+    file_path: String,
+) -> Option<String> {
+    if let Some(result) = remote_invoke_for_window(
+        &app,
+        &window,
+        "git:worktree-file",
+        vec![json!(cwd.clone()), json!(file_path)],
+    )
+    .await
+    {
+        return result
+            .and_then(from_remote_value::<Option<String>>)
+            .ok()
+            .flatten();
+    }
+    git_read_worktree_file_native(cwd, file_path).await
+}
+
+pub(crate) async fn git_read_worktree_file_native(cwd: String, file_path: String) -> Option<String> {
+    let max_bytes = bat_filesystem::MAX_READ_BYTES as usize;
+    crate::async_rt::spawn_blocking(move || {
+        let bytes = read_worktree_file(&cwd, &file_path, max_bytes)??;
+        decode_text_blob(bytes, max_bytes)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 // Ok(None) when the path does not exist at `rev`, the object is not a blob, or git fails.
@@ -308,15 +365,15 @@ pub async fn git_show_file(
     Ok(git_show_file_native(cwd, rev, file_path).await)
 }
 
-// Uses the working-tree reader's size cap (MAX_READ_BYTES); content that is not UTF-8 or
-// contains NUL is also refused, so binary files are never shown as text.
+// Uses the working-tree reader's size cap (MAX_READ_BYTES) on the raw bytes; binary (NUL) and
+// text that is neither UTF-8 nor UTF-16 with a BOM are refused.
 pub(crate) async fn git_show_file_native(
     cwd: String,
     rev: String,
     file_path: String,
 ) -> Option<String> {
-    let argv = build_show_file_args(&rev, &file_path)?;
     let max_bytes = bat_filesystem::MAX_READ_BYTES as usize;
+    let argv = build_show_file_args(&rev, &file_path)?;
     crate::async_rt::spawn_blocking(move || {
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let bytes = run_git_bytes(&cwd, &refs, Duration::from_secs(10), max_bytes)?;

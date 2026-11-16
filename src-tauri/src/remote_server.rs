@@ -3726,6 +3726,12 @@ fn invoke_rust_for_remote(
             ));
             to_json_value(channel, value)
         }),
+        "git:worktree-file" => string_param(params, "cwd", channel).and_then(|cwd| {
+            let file_path = string_param(params, "filePath", channel)?;
+            let value =
+                crate::async_rt::block_on(git_cmd::git_read_worktree_file_native(cwd, file_path));
+            to_json_value(channel, value)
+        }),
         "git:show-file" => string_param(params, "cwd", channel).and_then(|cwd| {
             let rev = string_param(params, "rev", channel)?;
             let file_path = string_param(params, "filePath", channel)?;
